@@ -326,7 +326,11 @@ export type AppState = {
    *  finished, right after a summary (nothing has measured what is left yet), and after a
    *  change to another provider's model. */
   context?: { used: number; limit?: number }
+  update?: UpdateInfo
 }
+
+/** A newer release. `manual`: this copy can't replace itself, so the release page is offered instead. */
+export type UpdateInfo = { version: string; status: "downloading" | "ready" | "manual" | "failed" }
 
 export type Rect = { x: number; y: number; width: number; height: number }
 
@@ -459,6 +463,8 @@ export type Commands = {
   replyPermission(id: string, decision: PermissionDecision): void
   answerQuestion(id: string, answer: Answer): void
   dismissQuestion(id: string): void
+  /** Restarts into the downloaded update, or opens the release page when there is none to install. */
+  installUpdate(): void
 }
 
 export type CommandName = keyof Commands
