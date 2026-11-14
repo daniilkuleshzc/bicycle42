@@ -28,7 +28,13 @@ bun run test:unit    # the Node part alone
 bun run check:design # the window's styles against the design system's rules
 ```
 
-The Electron parts load the pages in `../overlay/harness/`. No test needs an OpenCode server.
+The Electron parts load the pages in `../overlay/harness/`. None of these needs an OpenCode server.
+
+`bun run test:real` is the one that does, and it is not part of `bun run test`: it drives the
+app against the OpenCode server running on this computer with a real agent (three one-line CSS
+notes in a throwaway repository, then their pictures, diff, take back, a checkpoint and a
+commit), so it spends model tokens. It uses a free model unless `B42_REAL_MODEL=provider/model`
+names another, and deletes its conversation and its folder when it ends.
 
 `scripts/shot.mjs` takes screenshots of the window in every state from the renderer's mock
 (`src/renderer/mock.ts`); they go to `shots/` or `$SHOT_DIR`:
@@ -45,6 +51,7 @@ src/shared/types.ts     the contract: AppState, ChatEvent, Commands, Backend. Re
 src/main/index.ts       controller: owns AppState, wires the four parts below
 src/main/page.ts        the page: a WebContentsView with the overlay injected over CDP, in its own script world
 src/main/review.ts      a site's notes and their status rules (pure, no Electron)
+src/main/outbox.ts      what each unfinished note sends (prompt, pictures), on disk until it is done
 src/main/images.ts      screenshot → area crop + viewport thumbnail
 src/main/opencode.ts    the backend: fetch + one SSE stream → BackendEvents (no Electron)
 src/main/local.ts       finds the OpenCode server running on this computer
@@ -82,7 +89,14 @@ src/renderer/           the window: top bar, notes list, chat (Solid, @kkrll/des
   re-reads it after a reconnect, so a dropped connection can't duplicate or reorder messages.
 - **A note remembers the conversation it was sent to**, and carries a message id chosen here.
   Switching conversations, a restart or a dropped connection can't mark it done by mistake, and
-  retrying after a lost reply can't queue it twice.
+  retrying after a lost reply can't queue it twice. Its row says which conversation
+  (`NoteRow.session`), so the note's view can name one that is not open and Follow up can open
+  it first; a background note's follow-up stays in the open conversation, since the background
+  one is not a conversation to talk in.
+- **Take back says its way before it goes.** `takeBackWay` answers "undone" (the note is the
+  newest message of an idle conversation: an exact undo) or "asked" (the agent is asked to
+  reverse it); the view puts that in its question and hands it to `takeBackNote`, which does
+  nothing when the conversation has moved to the other way meanwhile.
 - **The page is untrusted.** The overlay and its way to the app (`window.__review`) are in a
   script world of their own (`WORLD` in `page.ts`): they share the page's document, but the
   site's scripts can't call the one or reach into the other. As a second lock, a note counts
@@ -124,6 +138,19 @@ src/renderer/           the window: top bar, notes list, chat (Solid, @kkrll/des
   select by that. So the edit stays put when the page adds, removes or reorders the elements
   around it, and the note names the element by the selector it has when it is sent. Only when
   the page builds the element anew (or reloads) is it found by where the old one last was.
+- **One note is one turn.** The server makes a turn of everything that reaches a conversation
+  while it is busy, and a turn is what it can show the changes of and take back. So the app
+  sends a lane's notes one at a time (`enqueue`, `pump` in `index.ts`): a note made while
+  another is with the agent, or while a typed message runs, is held in the app (`held` in
+  `review.ts`: "queued", with no conversation) and goes when that run ends. A stop or an
+  agent's error leaves the rest waiting until something is sent again. What a held note sends
+  is on disk (`outbox.ts`), so it is still sent after a restart.
+- **A waiting note is said once.** The server's queue holds notes and typed messages alike, and
+  the conversation gets both as waiting items; the window leaves out the ones that are notes on
+  the list (`ordered` in `renderer/chat.tsx`), so only a typed message waits there, with its
+  Cancel. A note's Cancel is in its own view and goes by the note (`cancelNote`): a held
+  note is simply stopped, one already in a conversation's queue is taken out of it there,
+  which need not be the open conversation.
 - **A note has one name** (`noteWords` in `../overlay/prompt.js`): the reviewer's words, or a
   summary of its canvas edits. The list, the pin's tooltip and the chat all show that.
 - **The overlay sits in the browser's top layer** (it is a popover), so a site's own dialogs and
@@ -155,6 +182,18 @@ src/renderer/           the window: top bar, notes list, chat (Solid, @kkrll/des
   A summary (asked for with `/compact`, or written by the server when the context fills) arrives
   as `session.compaction.*` events and shows as a folded step in the conversation; "nothing to
   compact yet" is a line there too. It moves no note: notes follow their own message ids.
+  How full the context is comes from the server's own counts (`AppState.context`). "Used" is
+  everything the agent's last finished step read and wrote: `tokens.input + cache.read +
+  cache.write + output + reasoning` of the newest assistant message that has counts and no
+  error (`GET …/message`, and `session.step.ended` as it happens). The limit is the model's
+  window, `limit.input` or `limit.context` of `GET /api/model`, the smaller when it has both.
+  That is the sum and the window the server itself uses to decide when to summarise, which it
+  does at the window less a reserve (15% unless configured). After a summary nothing is known
+  until the next step ends, and a count made by another provider's model is not used, as on the
+  server. The window shows it in the message box's bottom row (`renderer/meter.tsx`, arithmetic
+  in `renderer/context.ts`): nothing under half, a percentage from there (with the word
+  "Compact" while the agent is idle and no note waits), the warning colour
+  from 80%, and behind it one confirmed action, Compact, which is `runCommand("compact")`.
   `/undo` first says what it would take back and waits for Enter, because the server takes back
   **everything from that message on**, the agent's file changes included (files only where the
   folder is a git repository). What is undone stays out of the conversation until `/redo`, and
@@ -174,17 +213,20 @@ computed value of each property before and after (`gap: 16px → 32px`); a class
 the project keeps its styles. With them go two pictures of the same area, **before** and **after**
 the edits, named as such. If the page does not switch the edits
 off in time for the before picture (one second), the note goes with the after picture alone. In
-the notes list a canvas note has the sliders icon; its tooltip, and the row itself once its pin is
-clicked, list the edits in words. A canvas note sent without words is called by its edits
+the notes list a canvas note has the sliders icon; its tooltip, and the note's own view once it is
+opened, list the edits in words. A canvas note sent without words is called by its edits
 (`3 canvas edits: moved "Card · Pricing", styled "Card · Features", 1 new CSS rule`) in the list,
 on its pin and in the chat. A note may be new CSS rules and nothing else.
 
 ## Not done yet
 
 - Tabs and device widths (two tabs at 390 and 1440).
-- Before/after crops of what the agent changed, and taking back one note. (`/undo` takes back
-  the last message and everything after it, which is all the server offers; one turn out of the
-  middle needs its own design. Undoing does not yet change the status of the notes it covers.)
+- Taking back a note that is not the newest message is a request to the agent, not an exact
+  undo (the server undoes from a message on, never one turn out of the middle). A note's diff
+  is its turn's, and a message typed into the chat while the agent is on a note joins that
+  turn, so its changes show in the note's diff.
+- The picture after the agent is done is taken only while the page the note was made on is
+  open at the same width; a note finished while the reviewer is elsewhere has none.
 - Slash commands OpenCode has that are not here: `/share` (this server has no route for it),
   `/export`, `/copy`, `/timeline`, and choosing the message to fork from (a fork copies the
   whole conversation).

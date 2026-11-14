@@ -61,6 +61,45 @@ opens on the page it was last on, with its notes and conversation, or with no pa
 says which computer the project is on; the projects of servers you connected to before are in
 the list too, and choosing one connects to its server first.
 
+**Conversations:** a conversation is named after the first thing you say in it, a note or a
+message; `/rename`, or the pencil in the list, gives it a name of your own, which is kept. The
+conversation's name opens the list of the project's conversations, newest first, each with the
+number of this site's notes that went to it. Typing narrows it by name and by what the notes
+said. A row can be pinned to the top, renamed, archived (it leaves the list and can be brought
+back from **Archived**) or deleted for good; archiving or deleting the open one opens the
+most recent other one.
+
+**A note, opened:** click a note in the list and it takes the panel, above the message box,
+with **Notes** (or Esc) to go back and arrows to the note before and after. It shows what the
+note says and, once the agent is done, what came of it. Its area as it was when
+you made the note and as it is now the agent is done (the second picture is taken only on the
+page the note was made on, at the same window width); what changed in the code for it (its own
+changes only: the agent gets one note at a time, the others wait in the app); and two things to do when it is not right:
+**Follow up** on it in the conversation, or **Take back** what the agent did. A result that is
+right needs nothing: a done note counts as accepted unless it is taken back. Take back first
+says which way it will go: the newest message of an idle conversation is undone exactly, files
+included; for an older one, or while the agent works, the agent is asked to reverse it.
+A note stays with the conversation it was sent in. When that is not the open one, the note says
+which ("In Pricing page review"), Follow up opens it before starting the message, and Take back
+acts there.
+A note that still waits for its turn is in the list and not in the conversation; opened, it
+says so and has **Remove from queue**, which takes it out and leaves it on the list, stopped,
+with Retry.
+
+**Checkpoints and commits:** `/checkpoint name` marks a point in the conversation. Its line
+has **Return here**, which takes back every message after it and the files the agent changed
+since (in a git repository; `/redo` brings it back until you say something new). When the repo
+has uncommitted changes, the conversation's header shows how many lines are added and removed;
+open it for the branch, the files and a commit message started from the finished notes, and **Commit**
+asks the agent to commit everything, without pushing.
+
+**Context:** a long review fills what the agent can keep in mind. From half full, the message
+box shows how full it is, as a percentage beside the model (hover for the numbers); from 80% it
+turns amber. While the agent has nothing left to do it also reads **Compact**: between rounds of
+notes is when a summary loses least. Press it and then **Compact**, or type `/compact`: the agent summarises the
+conversation so far and continues from the summary. That cannot be undone, so it asks first.
+Left alone, the server does the same by itself when the context is nearly full.
+
 The app makes three sounds: a rising one when the agent asks something or wants permission, a
 falling one when a note fails or the server is lost, and a single note when the agent has
 finished everything you sent. They can be turned off in the settings (the server button, in the
@@ -120,15 +159,13 @@ timeline says how many); **Duplicate** gives the element a copy of its own. Dura
 easing and the rest belong to the element.
 
 In the chat box, `/` lists commands: the app's own (`/compact`, `/new`, `/undo`, `/redo`,
-`/rename`, `/fork`), then the ones the site's folder defines on the server. `@` names a file,
+`/rename`, `/fork`, `/checkpoint`), then the ones the site's folder defines on the server. `@` names a file,
 a skill or a helper agent.
 
 ## Not built yet
 
 - Signed builds and installers.
 - Tabs and device widths.
-- Before and after pictures of what the agent changed, and taking back one note
-  (`/undo` takes back the last message and everything after it).
 - Edit mode: adding elements, moving one into another container, reordering in block flow.
 
 The full list is in [app/README.md](app/README.md).

@@ -4,6 +4,7 @@
 //
 //   ?mock=connect | empty | folder | fresh | review | busy | permission | question |
 //         noconversation | nocommands | offline | pageerror | stress | stress-code
+//   &context=0.62 fills the conversation's context that far, for the meter in the message box
 //
 // It behaves enough like main to click through: commands change the state, sending a message
 // streams a reply, and the "page" is a painted box placed by setPageBounds exactly as the native
@@ -23,6 +24,7 @@ import type {
   PromptFile,
   Rect,
   SendOptions,
+  SessionSummary,
   Shortcut,
   SlashCommand,
 } from "../shared/types"
@@ -189,12 +191,14 @@ function notes(): NoteRow[] {
     text,
     status,
     lane: "main",
+    // A conversation has taken every note that waits, is worked on or is done.
+    ...(status === "queued" || status === "working" || status === "done" ? { sent: true as const, session: extra.lane === "bg" ? "s-bg" : SESSION } : {}),
     ...extra,
   })
   return [
-    row(1, "pl-8", "done"),
-    row(2, "hide on mobile", "done"),
-    row(3, "make this the primary button style", "done"),
+    row(1, "pl-8", "done", { pictures: "both" }),
+    row(2, "hide on mobile", "done", { pictures: "before", takenBack: "asked" }),
+    row(3, "make this the primary button style", "done", { pictures: "both" }),
     row(4, "too much space between the heading and the paragraph, should match the cards below", "working"),
     row(5, "swap these two", "queued"),
     row(6, "logo is blurry on retina", "failed", { error: "The server stopped answering (timeout after 30 s)." }),
@@ -358,17 +362,25 @@ function base(): AppState {
     page: { url: `${ORIGIN}/pricing`, loading: false, canGoBack: true, canGoForward: false, hmr: false },
     review: { enabled: true, mode: "notes", brush: false, autoReload: true, notes: notes(), unplaced: 2 },
     site: { origin: ORIGIN, directory: DIRECTORY },
+    repo: {
+      branch: "pricing-polish",
+      changes: [
+        { file: "src/components/pricing/PlanCard.tsx", additions: 3, deletions: 2, status: "modified" },
+        { file: "src/styles/buttons.css", additions: 4, deletions: 0, status: "modified" },
+        { file: "src/components/pricing/Faq.tsx", additions: 18, deletions: 0, status: "added" },
+      ],
+    },
     session: { id: SESSION, title: "Pricing page review", updated: now, busy: false, agent: "build", directory: DIRECTORY },
     sessions: [
-      { id: SESSION, title: "Pricing page review", updated: now, busy: false, directory: DIRECTORY },
-      { id: "s-2", title: "Checkout: mobile pass with a deliberately long title that has to be cut", updated: now - 2 * HOUR, busy: true, directory: DIRECTORY },
-      { id: "s-3", title: "Homepage spacing", updated: now - 26 * HOUR, busy: false, directory: DIRECTORY },
+      { id: "s-3", title: "Homepage spacing", updated: now - 26 * HOUR, busy: false, directory: DIRECTORY, pinned: true, notes: 4, said: "more air under the hero\nthe logos row is too tight" },
+      { id: SESSION, title: "Pricing page review", updated: now, busy: false, directory: DIRECTORY, notes: 7, said: "make this button bigger\nalign the plan cards" },
+      { id: "s-2", title: "Checkout: mobile pass with a deliberately long title that has to be cut", updated: now - 2 * HOUR, busy: true, directory: DIRECTORY, notes: 1, said: "the pay button is under the keyboard" },
       { id: "s-4", title: "Dark mode contrast", updated: now - 12 * 24 * HOUR, busy: false, directory: DIRECTORY },
     ],
     models: [
-      { providerID: "anthropic", id: "sonnet-4-5", name: "Sonnet 4.5", images: true, variants: ["low", "medium", "high"] },
-      { providerID: "anthropic", id: "haiku-4-5", name: "Haiku 4.5", images: true, variants: [] },
-      { providerID: "openai", id: "gpt-5", name: "GPT-5", images: true, variants: ["minimal", "high"] },
+      { providerID: "anthropic", id: "sonnet-4-5", name: "Sonnet 4.5", images: true, variants: ["low", "medium", "high"], context: 200_000 },
+      { providerID: "anthropic", id: "haiku-4-5", name: "Haiku 4.5", images: true, variants: [], context: 200_000 },
+      { providerID: "openai", id: "gpt-5", name: "GPT-5", images: true, variants: ["minimal", "high"], context: 400_000 },
       { providerID: "local", id: "qwen-coder", name: "Qwen Coder 32B", images: false, variants: [] },
     ],
     agents: [
@@ -432,6 +444,8 @@ export function install(scenario: string, params: URLSearchParams): Bridge {
   const emit = (e: ChatEvent) => chatFns.forEach((fn) => fn(e))
   const sid = () => state.session?.id ?? ""
   let serial = 0
+  /** The conversations put away. */
+  let put: SessionSummary[] = [{ id: "s-9", title: "Footer links", updated: Date.now() - 40 * 24 * HOUR, busy: false, directory: DIRECTORY, archived: true }]
 
   /** Streams `text` into a new assistant item the way the server does: small deltas over time. */
   function stream(text: string, done: () => void = () => {}, pace = 16) {
@@ -480,6 +494,14 @@ export function install(scenario: string, params: URLSearchParams): Bridge {
         else note.status = "done"
       }
   }
+  /** As main decides it: the newest finished note of an idle conversation is undone exactly;
+   *  for any other the agent is asked. */
+  function takeBackWay(id: string): "undone" | "asked" {
+    const note = state.review.notes.find((n) => n.id === id)
+    const newest = state.review.notes.filter((n) => n.session === note?.session && n.status === "done").at(-1)
+    const busy = note?.session === state.session?.id ? state.session?.busy : state.sessions.find((s) => s.id === note?.session)?.busy
+    return note && note === newest && !busy ? "undone" : "asked"
+  }
   /** The next waiting message gets its turn, or the agent goes idle. */
   function next() {
     const w = queue.shift()
@@ -519,6 +541,9 @@ export function install(scenario: string, params: URLSearchParams): Bridge {
     stream(reply)
   }
 
+  // ?context=0.62: the open conversation's context is that full, of the model's 200k window.
+  const full = Number(params.get("context"))
+  if (full > 0) state.context = { used: Math.round(full * 200_000), limit: 200_000 }
   switch (scenario) {
     case "connect":
       Object.assign(state, { ...base(), connection: { status: "unconfigured" }, site: null, session: null, sessions: [] })
@@ -848,7 +873,12 @@ export function install(scenario: string, params: URLSearchParams): Bridge {
       if (name === "compact") {
         const item = { kind: "assistant" as const, id: `sum-${++serial}`, time: Date.now(), summary: "manual" as const }
         emit({ type: "item", session: sid(), item: { ...item, parts: [], done: false } })
-        setTimeout(() => emit({ type: "item", session: sid(), item: { ...item, parts: [{ kind: "text", key: "text:0", text: SUMMARY }], done: true } }), 700)
+        setTimeout(() => {
+          emit({ type: "item", session: sid(), item: { ...item, parts: [{ kind: "text", key: "text:0", text: SUMMARY }], done: true } })
+          // Nothing has counted what the summary left: the meter goes until the next step.
+          delete state.context
+          push()
+        }, 700)
         return
       }
       if (name === "undo")
@@ -879,6 +909,15 @@ export function install(scenario: string, params: URLSearchParams): Bridge {
       emit({ type: "remove", session: sid(), item: id })
       push()
     },
+    cancelNote(id) {
+      const note = state.review.notes.find((x) => x.id === id)
+      if (!note || note.status !== "queued") throw new Error("This note is no longer waiting.")
+      const at = queue.findIndex((w) => w.n === note.n)
+      if (at >= 0) emit({ type: "remove", session: sid(), item: queue.splice(at, 1)[0]!.id })
+      // As main does: it stays on the list, stopped, with Retry.
+      state.review.notes = state.review.notes.map((x) => (x.id === id ? { ...x, status: "failed" as const, error: "Cancelled.", stopped: true as const } : x))
+      push()
+    },
     stop: () => stop(),
     newSession() {
       state.session = { id: `s-${++serial}`, title: "New conversation", updated: Date.now(), busy: false, directory: state.site?.directory ?? DIRECTORY }
@@ -891,6 +930,66 @@ export function install(scenario: string, params: URLSearchParams): Bridge {
       state.session = { ...found }
       push()
       emit({ type: "reset", session: id, items: id === SESSION ? transcript() : [] })
+    },
+    notePictures(id) {
+      const note = state.review.notes.find((n) => n.id === id)
+      const picture = (fill: string, pad: number) =>
+        `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="480" height="260"><rect width="480" height="260" fill="#f4f1ea"/><rect x="40" y="${40 + pad}" width="220" height="26" rx="4" fill="#222"/><rect x="40" y="${96 + pad * 2}" width="360" height="12" rx="3" fill="#999"/><rect x="40" y="${118 + pad * 2}" width="300" height="12" rx="3" fill="#999"/><rect x="40" y="${166 + pad * 2}" width="${120 + pad * 4}" height="${36 + pad}" rx="8" fill="${fill}"/></svg>`)}`
+      return note?.pictures ? { before: picture("#2563eb", 0), ...(note.pictures === "both" ? { after: picture("#16a34a", 8) } : {}) } : {}
+    },
+    noteDiff: () => [
+      { file: "src/components/pricing/PlanCard.tsx", additions: 3, deletions: 2, patch: "@@ -12,7 +12,8 @@ export function PlanCard(props) {\n   return (\n     <article class=\"plan\">\n-      <button class=\"btn\">Start free trial</button>\n-      <p class=\"fine\">No card needed</p>\n+      <button class=\"btn btn-lg\">Start free trial</button>\n+      <p class=\"fine\">No card needed.</p>\n+      <p class=\"fine\">Cancel any time.</p>\n     </article>\n   )" },
+      { file: "src/styles/buttons.css", additions: 4, deletions: 0, patch: "@@ -40,3 +40,7 @@\n .btn:hover {\n   filter: brightness(1.05);\n }\n+.btn-lg {\n+  height: 48px;\n+  padding: 0 20px;\n+}" },
+    ],
+    takeBackWay: (id) => takeBackWay(id),
+    takeBackNote(id) {
+      const how = takeBackWay(id)
+      state.review.notes = state.review.notes.map((n) => (n.id === id ? { ...n, takenBack: how } : n))
+      push()
+      return how
+    },
+    addCheckpoint(name) {
+      emit({ type: "item", session: sid(), item: { kind: "marker", id: `checkpoint:c-${++serial}`, time: Date.now(), tone: "info", text: name || "Checkpoint", checkpoint: `c-${serial}` } })
+    },
+    removeCheckpoint(id) {
+      emit({ type: "remove", session: sid(), item: `checkpoint:${id}` })
+    },
+    returnToCheckpoint: () => 3,
+    refreshRepo() {},
+    commitChanges() {
+      delete state.repo
+      push()
+    },
+    refreshSessions() {},
+    archivedSessions: () => put,
+    renameSession(id, title) {
+      state.sessions = state.sessions.map((s) => (s.id === id ? { ...s, title } : s))
+      if (state.session?.id === id) state.session = { ...state.session, title }
+      push()
+    },
+    pinSession(id, pinned) {
+      const all: SessionSummary[] = state.sessions.map((s) => {
+        const { pinned: _was, ...rest } = s
+        return s.id === id && pinned ? { ...rest, pinned: true as const } : s.id === id ? rest : s
+      })
+      state.sessions = [...all.filter((s) => s.pinned), ...all.filter((s) => !s.pinned)]
+      push()
+    },
+    archiveSession(id, archived) {
+      const from = archived ? state.sessions : put
+      const found = from.find((s) => s.id === id)
+      if (!found) return
+      const { archived: _a, pinned: _p, ...rest } = found
+      if (archived) (put = [{ ...rest, archived: true }, ...put]), (state.sessions = state.sessions.filter((s) => s.id !== id))
+      else (put = put.filter((s) => s.id !== id)), (state.sessions = [...state.sessions, rest].sort((x, y) => y.updated - x.updated))
+      if (archived && state.session?.id === id) return void (state.sessions[0] ? this.openSession(state.sessions[0].id) : this.newSession())
+      push()
+    },
+    deleteSession(id) {
+      put = put.filter((s) => s.id !== id)
+      state.sessions = state.sessions.filter((s) => s.id !== id)
+      if (state.session?.id === id) return void (state.sessions[0] ? this.openSession(state.sessions[0].id) : this.newSession())
+      push()
     },
     setModel(model) {
       if (state.session) state.session.model = model

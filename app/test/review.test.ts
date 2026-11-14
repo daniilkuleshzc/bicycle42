@@ -413,22 +413,39 @@ test("rows and pins", () => {
   ])
 })
 
-test("clearFinished keeps what is still going, and numbering goes on from the last note left", () => {
+test("clearDone takes only what is done: a failed or stopped note stays to be retried, and numbering goes on from the last note left", () => {
   const r = createReview()
   const done = noteAt(r, "done")
   const working = noteAt(r, "working")
   const failed = noteAt(r, "failed")
-  r.clearFinished()
-  assert.deepEqual(r.rows().map((x) => x.id), [working])
+  const stopped = noteAt(r, "queued")
+  r.inbox(A, r.note(stopped)!.message!, "cancelled")
+  r.clearDone()
+  assert.deepEqual(r.rows().map((x) => x.id), [working, failed, stopped])
   assert.equal(r.note(done), undefined)
-  assert.equal(r.note(failed), undefined)
-  assert.equal(r.add(pn())!.n, 3, "after note 2")
+  assert.equal(r.rows()[2]!.stopped, true)
+  assert.equal(r.retry(failed)?.id, failed, "its Retry is still there")
+  assert.equal(r.add(pn())!.n, 5, "after note 4")
 
   r.run(A, "succeeded")
-  r.failed(r.rows()[1]!.id, "x")
-  r.clearFinished()
+  for (const row of r.rows()) if (row.status !== "done") r.remove(row.id)
+  r.clearDone()
   assert.deepEqual(r.rows(), [])
   assert.equal(r.add(pn())!.n, 1, "an empty review starts over")
+})
+
+test("a row names the conversation that took its note, once one has", () => {
+  const r = createReview()
+  const waiting = noteAt(r, "sending")
+  const main = noteAt(r, "queued")
+  const other = noteAt(r, "done", B)
+  const row = (id: string) => r.rows().find((x) => x.id === id)!
+  assert.deepEqual([row(waiting).sent, row(waiting).session], [undefined, undefined])
+  assert.deepEqual([row(main).sent, row(main).session], [true, A])
+  assert.deepEqual([row(other).sent, row(other).session], [true, B])
+  r.inbox(A, r.note(main)!.message!, "cancelled")
+  assert.equal(r.retry(main)?.id, main)
+  assert.equal(row(main).session, undefined, "a retry is not anybody's yet")
 })
 
 test("unplaced pins are counted", () => {
@@ -450,7 +467,7 @@ test("toJSON is versioned strict JSON and restores to the same review", () => {
   noteAt(r, "working", B)
   noteAt(r, "queued")
   r.add(pn({ targets: [{ selector: "p", tag: "p", rect: { x: 0, y: 0, w: 1, h: 1 } }], bounds: null }))
-  r.clearFinished()
+  r.clearDone()
   r.draft = { text: "half-written", gone: undefined }
   r.setUnplaced(["x"])
 
@@ -946,4 +963,41 @@ test("a motion note: kept with the note, saved and read back, and named by its a
   assert.deepEqual(back.note(note.id)!.motion, MOTION)
   // a transition with no words has nothing to send
   assert.equal(noteWords(pageNote(motionNote({ kind: "transition", name: "transition", selector: "b", label: "Button" }))!), "")
+})
+
+test("a note held in the app: it waits with no conversation, goes when its lane is free, and is still held after a restart", () => {
+  const r = createReview()
+  const [a, b, c] = [r.add(pn())!.id, r.add(pn())!.id, r.add(pn({ lane: "bg" } as Partial<PageNote>))!.id]
+  for (const id of [a, b, c]) (r.sending(id), r.hold(id))
+  assert.deepEqual(r.rows().map((x) => [x.status, x.sent, x.session]), [["queued", undefined, undefined], ["queued", undefined, undefined], ["queued", undefined, undefined]])
+  assert.deepEqual(r.sessions(), [], "no conversation owes anything for them")
+  assert.equal(r.inFlight(), true)
+
+  // The first of the lane goes; while it is on its way or with the agent, the next one waits.
+  assert.equal(r.next("main")?.id, a)
+  assert.equal(r.release(a)?.status, "sending")
+  assert.equal(r.next("main"), undefined)
+  r.sent(a, "m_a", A)
+  assert.equal(r.next("main"), undefined)
+  r.inbox(A, "m_a", "working")
+  assert.equal(r.next("main"), undefined)
+  // A run of that conversation ending finishes what it had, not what waits in the app.
+  r.run(A, "succeeded")
+  assert.deepEqual(r.rows().map((x) => x.status), ["done", "queued", "queued"])
+  assert.equal(r.next("main")?.id, b)
+
+  // Saved and read back, a held note is still held; one that only claims to be queued is not.
+  const back = createReview(JSON.parse(JSON.stringify(r.toJSON())))
+  assert.equal(back.next("main")?.id, b)
+  const stale = createReview({ version: REVIEW_VERSION, notes: [{ id: "x", n: 1, text: "x", status: "queued", lane: "main", anchor: {} }] })
+  assert.deepEqual([stale.rows()[0]!.status, stale.rows()[0]!.error], ["failed", RESTARTED])
+
+  // Taken out of the queue it is stopped, and no longer held; a failed one can go again.
+  assert.equal(r.cancel(b), true)
+  assert.equal(r.cancel(b), false)
+  assert.deepEqual([r.rows()[1]!.status, r.rows()[1]!.stopped], ["failed", true])
+  assert.equal(r.next("main"), undefined)
+  assert.equal(r.retry(b)?.status, "sending")
+  r.hold(b)
+  assert.equal(r.next("main")?.id, b)
 })

@@ -7,6 +7,11 @@
 // A note's life:  capturing → sending → queued → working → done
 //                                 └────────┴────────┴──→ failed  (retry puts it back to sending)
 //
+// A note is sent only when its lane has no other note with the agent: prompts that reach a busy
+// conversation join the turn that is running, and a turn is what the server can show the changes
+// of and take back. Until then the note is held here: "queued" to the reviewer, with no
+// conversation yet (hold → release → sending → sent).
+//
 // Done and failed are final: no event moves a note out of them, only retry() (or remove()).
 // A note belongs to the conversation (session) it was sent to, not to a lane: after "New
 // conversation" the lane points somewhere else, and that conversation's events are not about
@@ -30,10 +35,13 @@ export type Note = Omit<NoteRow, "edits" | "motion"> & {
   css?: string
   /** A motion note's animation (checked). */
   motion?: Motion
-  /** The message id the backend gave it; inbox events carry it. */
+  /** The message id the backend gave it; inbox events carry it. Set together with `session`. */
   message?: string
-  /** The conversation that accepted it. Set together with `message`. */
-  session?: string
+  /** Waiting in the app for its lane to be free: "queued", and not sent to any conversation. */
+  held?: true
+  /** Where its picture was taken: the page, the marked area and the viewport then, so the same
+   *  picture can be taken once the agent is done. */
+  shot?: { url: string; bounds: Box | null; viewport: PageNote["viewport"] }
   /** For re-finding the pin after the page changes. */
   anchor: { selector?: string; tag?: string; text?: string; component?: string; at?: [number, number] }
 }
@@ -49,6 +57,15 @@ export type Review = {
   add(note: PageNote): Note | undefined
   /** The screenshot is taken and the note is on its way to the agent. */
   sending(id: string): void
+  /** A note on its way out waits its turn in the app instead: "queued", with no conversation. */
+  hold(id: string): void
+  /** The held note that may go now: the first of its lane, when no other note of the lane is on
+   *  its way to the agent or with it. */
+  next(lane: NoteRow["lane"]): Note | undefined
+  /** Puts a held note on its way ("sending") and returns it. */
+  release(id: string): Note | undefined
+  /** A held note is taken out of the queue: it stays on the list, stopped. True when it was held. */
+  cancel(id: string): boolean
   /** `session` accepted it; `message` is the id later inbox events carry. */
   sent(id: string, message: string, session: string): void
   failed(id: string, error: string): void
@@ -70,9 +87,17 @@ export type Review = {
   sessions(): string[]
   /** Takes a note off the list, whatever its state. */
   remove(id: string): void
-  clearFinished(): void
+  /** Takes the notes that are done off the list. Failed and stopped ones stay: they can still be
+   *  retried. */
+  clearDone(): void
   note(id: string): Note | undefined
   rows(): NoteRow[]
+  /** What the reviewer, or the app, says of a note beside its status: which pictures it has,
+   *  that it was taken back. `undefined` clears. True when it changed. */
+  mark(id: string, change: { pictures?: Note["pictures"]; takenBack?: Note["takenBack"] }): boolean
+  /** The words of every note a conversation accepted, by conversation: what the list of
+   *  conversations counts and searches. */
+  said(): Array<{ session: string; text: string }>
   pins(): Pin[]
   /** A note is on its way to the agent or with it (sending, queued, working). Unlike sessions(),
    *  this counts notes still being sent, which have no session yet. */
@@ -343,10 +368,20 @@ function savedNote(raw: unknown): Note | undefined {
   if (css) note.css = css
   const motion = pageMotion(raw.motion)
   if (motion) note.motion = motion
+  if (raw.pictures === "before" || raw.pictures === "both") note.pictures = raw.pictures
+  if (raw.held === true && raw.status === "queued") note.held = true
+  if (raw.takenBack === "undone" || raw.takenBack === "asked") note.takenBack = raw.takenBack
+  const shot = isObj(raw.shot) ? raw.shot : undefined
+  const v = shot && isObj(shot.viewport) ? shot.viewport : undefined
+  const b = shot && isObj(shot.bounds) ? shot.bounds : undefined
+  const nums = (o: Record<string, unknown>, keys: string[]) => keys.every((k) => typeof o[k] === "number" && Number.isFinite(o[k]))
+  if (shot && str(shot.url) && v && nums(v, ["w", "h", "dpr", "scrollX", "scrollY"]) && (!b || nums(b, ["x", "y", "w", "h"])))
+    note.shot = { url: shot.url as string, bounds: b ? (b as unknown as Box) : null, viewport: v as unknown as PageNote["viewport"] }
   // The screenshot and prompt of a note still on its way out died with the app. So did our
   // knowledge of where a note went, if it was saved before notes recorded their session.
   const unsent = note.status === "capturing" || note.status === "sending"
-  const untraceable = (note.status === "queued" || note.status === "working") && !(note.message && note.session)
+  // (A held note has no conversation yet, and what it sends is on disk: it waits on.)
+  const untraceable = (note.status === "queued" || note.status === "working") && !(note.message && note.session) && !note.held
   if (unsent || untraceable) {
     note.status = "failed"
     note.error = ERR.restarted
@@ -445,6 +480,7 @@ export function createReview(saved?: unknown): Review {
         ...(pn.edits?.length ? { edits: pn.edits } : {}),
         ...(pn.css ? { css: pn.css } : {}),
         ...(pn.motion ? { motion: pn.motion } : {}),
+        shot: { url: pn.url, bounds: pn.bounds, viewport: pn.viewport },
       }
       notes.push(note)
       review.draft = null
@@ -454,6 +490,38 @@ export function createReview(saved?: unknown): Review {
     sending(id) {
       const note = find(id)
       if (note?.status === "capturing") note.status = "sending"
+    },
+
+    hold(id) {
+      const note = find(id)
+      if (note?.status !== "sending") return
+      note.status = "queued"
+      note.held = true
+    },
+
+    next(lane) {
+      let first: Note | undefined
+      for (const n of notes) {
+        if (n.lane !== lane) continue
+        if (n.status === "sending" || (open(n) && !n.held)) return undefined
+        if (n.held && n.status === "queued") first ??= n
+      }
+      return first
+    },
+
+    release(id) {
+      const note = find(id)
+      if (!note?.held || note.status !== "queued") return
+      delete note.held
+      note.status = "sending"
+      return note
+    },
+
+    cancel(id) {
+      const note = find(id)
+      if (!note?.held || note.status !== "queued") return false
+      delete note.held
+      return move(note, "failed", ERR.cancelled)
     },
 
     sent(id, message, session) {
@@ -471,7 +539,9 @@ export function createReview(saved?: unknown): Review {
 
     failed(id, error) {
       const note = find(id)
-      if (note) move(note, "failed", error)
+      if (!note) return
+      delete note.held
+      move(note, "failed", error)
     },
 
     retry(id) {
@@ -550,18 +620,32 @@ export function createReview(saved?: unknown): Review {
       return touched
     },
 
-    sessions: () => [...new Set(notes.filter(open).map((n) => n.session!))],
+    sessions: () => [...new Set(notes.flatMap((n) => (open(n) && n.session ? [n.session] : [])))],
 
     remove(id) {
       notes = notes.filter((n) => n.id !== id)
     },
 
-    clearFinished() {
-      notes = notes.filter((n) => !finished(n))
+    clearDone() {
+      notes = notes.filter((n) => n.status !== "done")
     },
 
     note: find,
 
+    mark(id, change) {
+      const note = find(id)
+      if (!note) return false
+      let touched = false
+      for (const key of ["pictures", "takenBack"] as const) {
+        if (!(key in change) || note[key] === change[key]) continue
+        if (change[key] === undefined) delete note[key]
+        else (note as Record<string, unknown>)[key] = change[key]
+        touched = true
+      }
+      return touched
+    },
+
+    said: () => notes.flatMap((n) => (n.session ? [{ session: n.session, text: n.text }] : [])),
     rows: () =>
       notes.map((n) => ({
         id: n.id,
@@ -572,6 +656,9 @@ export function createReview(saved?: unknown): Review {
         ...(n.edits || n.css ? { edits: [...(n.edits ?? []).map((e) => editWords(e)), ...(n.css ? [`${capital(cssWords(n.css))}.`] : [])] } : {}),
         ...(n.motion ? { edits: motionLines(n.motion), motion: true as const } : {}),
         ...(n.error ? { error: n.error } : {}),
+        ...(n.session && n.message ? { sent: true as const, session: n.session } : {}),
+        ...(n.pictures ? { pictures: n.pictures } : {}),
+        ...(n.takenBack ? { takenBack: n.takenBack } : {}),
         ...(n.status === "failed" && (n.error === ERR.interrupted || n.error === ERR.cancelled) ? { stopped: true as const } : {}),
         ...(unplaced.includes(n.id) ? { lost: true as const } : {}),
       })),
