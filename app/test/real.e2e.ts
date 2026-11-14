@@ -357,6 +357,16 @@ async function main() {
     check("the repo state shows nothing left to commit", (await until(() => state().repo?.changes.length === 0, 10_000)) === true, JSON.stringify(state().repo))
     check("the stylesheet committed is the one on screen", git("show", "HEAD:style.css") === afterTakeBack.trim() || git("show", "HEAD:style.css").trim() === afterTakeBack.trim())
 
+    // Two notes made one right after the other: the second waits in the app, so each is a
+    // turn of its own on the server and has its own diff.
+    const fourth = await note("#cta", "make the button orange")
+    const fifth = await note("#title", "make the heading purple")
+    check("the second of two notes waits in the app while the first is with the agent", row(fifth)?.status === "queued" && !row(fifth)?.sent, JSON.stringify(row(fifth)))
+    check("the agent finishes both", (await finished(fourth)) && (await finished(fifth)), `${row(fourth)?.status} ${row(fifth)?.status}`)
+    const [d4, d5] = [await invoke<FileChange[]>("noteDiff", fourth).catch(() => []), await invoke<FileChange[]>("noteDiff", fifth).catch(() => [])]
+    const lines = (d: FileChange[]) => d.flatMap((f) => f.patch.split("\n").filter((l) => /^[+-](?![+-])/.test(l))).join("\n")
+    check("each has a diff of its own: the button's change is not in the heading's, nor the other way", d4.length === 1 && d5.length === 1 && lines(d4) !== lines(d5) && !lines(d5).split("\n").some((l) => lines(d4).includes(l)), `${lines(d4)} // ${lines(d5)}`)
+
     check("the conversation still has the name the first note gave it", (await info()).title === "Make the button green" && state().session?.title === "Make the button green", `${(await info()).title} / ${state().session?.title}`)
 
     clearInterval(approver)

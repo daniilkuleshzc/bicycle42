@@ -73,8 +73,8 @@ most recent other one.
 with **Notes** (or Esc) to go back and arrows to the note before and after. It shows what the
 note says and, once the agent is done, what came of it. Its area as it was when
 you made the note and as it is now the agent is done (the second picture is taken only on the
-page the note was made on, at the same window width); what changed in the code for it (notes
-that waited together for the agent share one diff); and two things to do when it is not right:
+page the note was made on, at the same window width); what changed in the code for it (its own
+changes only: the agent gets one note at a time, the others wait in the app); and two things to do when it is not right:
 **Follow up** on it in the conversation, or **Take back** what the agent did. A result that is
 right needs nothing: a done note counts as accepted unless it is taken back. Take back first
 says which way it will go: the newest message of an idle conversation is undone exactly, files
@@ -83,7 +83,7 @@ A note stays with the conversation it was sent in. When that is not the open one
 which ("In Pricing page review"), Follow up opens it before starting the message, and Take back
 acts there.
 A note that still waits for its turn is in the list and not in the conversation; opened, it
-says so and has **Cancel**, which takes it out of the queue and leaves it on the list, stopped,
+says so and has **Remove from queue**, which takes it out and leaves it on the list, stopped,
 with Retry.
 
 **Checkpoints and commits:** `/checkpoint name` marks a point in the conversation. Its line

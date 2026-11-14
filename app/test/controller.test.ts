@@ -6,6 +6,7 @@
 // conversation, a new conversation with work in flight, a relaunch, a server that is down at
 // launch. Each asserts what the reviewer at the screen must see.
 import assert from "node:assert/strict"
+import crypto from "node:crypto"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
@@ -97,8 +98,21 @@ async function fakeOpenCode() {
   return { server, w }
 }
 
-async function boot(opts: { settings?: unknown; reviews?: Record<string, unknown>; server?: { server: FakeServer; w: World } } = {}) {
+/** The agent takes the newest prompt and finishes it. One note is one turn: the next waiting
+ *  note is sent only once this one's run has ended. */
+function turn(h: { w: World; agent: { starts(s: string): void; picksUp(s: string, id: string): void; finishes(s: string): void } }, s: string) {
+  h.agent.starts(s)
+  h.agent.picksUp(s, h.w.prompts.at(-1)!.id)
+  h.agent.finishes(s)
+}
+
+async function boot(opts: { settings?: unknown; reviews?: Record<string, unknown>; outbox?: Record<string, unknown>; server?: { server: FakeServer; w: World } } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bicycle42-ctl-"))
+  // What a note sends, as the app left it on disk (src/main/outbox.ts), by the note's id.
+  for (const [id, payload] of Object.entries(opts.outbox ?? {})) {
+    fs.mkdirSync(path.join(dir, "outbox"), { recursive: true })
+    fs.writeFileSync(path.join(dir, "outbox", `${crypto.createHash("sha1").update(id).digest("hex")}.json`), JSON.stringify(payload))
+  }
   if (opts.settings) fs.writeFileSync(path.join(dir, "settings.json"), JSON.stringify(opts.settings))
   for (const [origin, review] of Object.entries(opts.reviews ?? {})) {
     fs.mkdirSync(path.join(dir, "reviews"), { recursive: true })
@@ -187,7 +201,7 @@ test("a reply lost on the way back: Retry does not queue the note twice", async 
     await until(() => h.notes() === "1:failed")
     assert.equal(h.w.prompts.length, 1, "the server did take it")
     await h.cmd("retryNote", id)
-    await until(() => h.notes() === "1:queued")
+    await until(() => h.notes() === "1:queued" && !!h.snap().review.notes[0]?.sent)
     assert.equal(h.w.prompts.length, 1, "the retry carried the same message id")
   } finally {
     await h.close()
@@ -199,7 +213,8 @@ test("Stop: the working note fails with a way forward, queued ones stay queued, 
   try {
     const s = await h.ready()
     const [a, b] = [h.note("a"), h.note("b"), h.note("c")]
-    await until(() => h.w.prompts.length === 3)
+    await until(() => h.notes() === "1:queued 2:queued 3:queued")
+    assert.equal(h.w.prompts.length, 1, "one note at a time: the others wait in the app")
     const [m1] = h.w.prompts.map((p) => p.id)
     h.agent.starts(s)
     h.agent.picksUp(s, m1!)
@@ -207,11 +222,14 @@ test("Stop: the working note fails with a way forward, queued ones stay queued, 
     h.agent.isStopped(s)
     await until(() => h.notes() === "1:failed 2:queued 3:queued")
     assert.match(h.snap().review.notes[0]!.error ?? "", /Retry/, "the message says what to do")
+    await sleep(100)
+    assert.equal(h.w.prompts.length, 1, "a stop stops the queue too: nothing goes by itself")
 
     await h.cmd("retryNote", a)
-    await until(() => h.notes() === "1:queued 2:queued 3:queued")
-    assert.equal(h.w.prompts.length, 4, "an accepted note goes again as a new message")
-    assert.notEqual(h.w.prompts[3]!.id, m1)
+    await until(() => h.w.prompts.length === 2)
+    assert.equal(h.notes(), "1:queued 2:queued 3:queued")
+    assert.notEqual(h.w.prompts[1]!.id, m1, "an accepted note goes again as a new message")
+    assert.deepEqual(h.snap().review.notes.map((n) => !!n.sent), [true, false, false], "and in its place, before the ones that waited behind it")
 
     // The connection drops and comes back while the conversation sits idle with its queue full.
     h.server.drop()
@@ -232,21 +250,21 @@ test("the conversation is deleted while notes are in flight: they fail, and the 
     const s = await h.ready()
     h.note("a")
     h.note("b")
-    await until(() => h.w.prompts.length === 2)
+    await until(() => h.notes() === "1:queued 2:queued" && h.w.prompts.length === 1)
     h.agent.starts(s)
     h.agent.picksUp(s, h.w.prompts[0]!.id)
     await until(() => h.notes() === "1:working 2:queued")
     h.w.sessions.delete(s)
     h.emit("session.deleted", s)
-    await until(() => h.notes() === "1:failed 2:failed")
-    assert.match(h.snap().review.notes[1]!.error ?? "", /deleted/i)
+    await until(() => h.notes().startsWith("1:failed"))
+    assert.match(h.snap().review.notes[0]!.error ?? "", /deleted/i)
     await until(() => !!h.snap().session && h.snap().session!.id !== s)
+    // The note that waited in the app was never in the deleted conversation: it goes to the new one.
+    await until(() => h.w.prompts.length === 2)
+    assert.equal(h.w.prompts[1]!.session, h.snap().session!.id, "the waiting note goes to the new conversation")
     h.note("c")
-    await until(() => h.w.prompts.length === 3)
-    assert.equal(h.w.prompts[2]!.session, h.snap().session!.id, "the next note goes to the new conversation")
-    // The server has it; the note is queued once its answer is back here.
-    await until(() => h.notes() === "1:failed 2:failed 3:queued")
-    assert.equal(h.notes(), "1:failed 2:failed 3:queued")
+    await until(() => h.notes() === "1:failed 2:queued 3:queued")
+    assert.equal(h.w.prompts.length, 2, "and the next one waits behind it")
   } finally {
     await h.close()
   }
@@ -258,7 +276,7 @@ test("a new conversation does not finish the old one's notes", async () => {
     const old = await h.ready()
     h.note("a")
     h.note("b")
-    await until(() => h.w.prompts.length === 2)
+    await until(() => h.notes() === "1:queued 2:queued" && h.w.prompts.length === 1)
     h.agent.starts(old)
     h.agent.picksUp(old, h.w.prompts[0]!.id)
     await until(() => h.notes() === "1:working 2:queued")
@@ -269,17 +287,22 @@ test("a new conversation does not finish the old one's notes", async () => {
     await sleep(100)
     assert.equal(h.notes(), "1:working 2:queued", "opening an idle conversation settles nothing on the old one")
 
-    h.note("c")
-    await until(() => h.w.prompts.length === 3)
+    // A run in the new conversation (a message typed there) is not about the old one's note.
     h.agent.starts(neu)
-    h.agent.picksUp(neu, h.w.prompts[2]!.id)
     h.agent.finishes(neu)
-    await until(() => h.notes() === "1:working 2:queued 3:done")
+    await sleep(100)
+    assert.equal(h.notes(), "1:working 2:queued")
+    assert.equal(h.w.prompts.length, 1, "the waiting note still waits for the one before it")
 
-    // The old conversation is still at it, and its events still land on its notes.
-    h.agent.picksUp(old, h.w.prompts[1]!.id)
+    // The old conversation is still at it, and its events still land on its note. Then the
+    // waiting note goes, to the conversation that is open now.
     h.agent.finishes(old)
-    await until(() => h.notes() === "1:done 2:done 3:done")
+    await until(() => h.w.prompts.length === 2)
+    assert.equal(h.w.prompts[1]!.session, neu)
+    h.agent.starts(neu)
+    h.agent.picksUp(neu, h.w.prompts[1]!.id)
+    h.agent.finishes(neu)
+    await until(() => h.notes() === "1:done 2:done")
   } finally {
     await h.close()
   }
@@ -595,6 +618,62 @@ test("relaunch with an idle conversation: finished notes are done, a still-waiti
   }
 })
 
+test("one note is one turn: the next goes when the one before is done, and not while a typed message runs", async () => {
+  const h = await boot()
+  try {
+    const s = await h.ready()
+    h.note("a")
+    h.note("b")
+    h.note("c")
+    await until(() => h.notes() === "1:queued 2:queued 3:queued" && h.w.prompts.length === 1)
+    assert.deepEqual(h.snap().review.notes.map((n) => !!n.sent), [true, false, false], "only the first is with the agent")
+    turn(h, s)
+    await until(() => h.w.prompts.length === 2 && h.notes() === "1:done 2:queued 3:queued")
+    turn(h, s)
+    await until(() => h.w.prompts.length === 3)
+    turn(h, s)
+    await until(() => h.notes() === "1:done 2:done 3:done")
+
+    // The agent is on a message typed in the chat: a note made now waits for that run to end.
+    h.agent.starts(s)
+    h.note("d")
+    await until(() => h.notes() === "1:done 2:done 3:done 4:queued")
+    await sleep(100)
+    assert.equal(h.w.prompts.length, 3, "nothing joins the running turn")
+    h.agent.finishes(s)
+    await until(() => h.w.prompts.length === 4)
+  } finally {
+    await h.close()
+  }
+})
+
+test("relaunch with a note that was waiting in the app: it is sent, pictures and all, from what was kept on disk", async () => {
+  const fake = await fakeOpenCode()
+  fake.w.sessions.set("ses_live", { id: "ses_live", location: { directory: "/repo" }, title: "t", time: { created: 1, updated: 2, busy: 3, idle: 4 } })
+  const held = { id: "b", n: 2, text: "b", status: "queued", lane: "main", held: true, anchor: {} }
+  const lost = { id: "c", n: 3, text: "c", status: "queued", lane: "main", held: true, anchor: {} }
+  const h = await boot({
+    server: fake,
+    settings: savedSite({ session: "ses_live" }),
+    reviews: { [SITE]: { version: 1, notes: [savedNote("a", 1, "working", "msg_a", "ses_live"), held, lost] } },
+    outbox: { b: { text: "UI review note 2\nNote: b", files: [{ name: "note-2.jpg", uri: "data:image/jpeg;base64,QUJD" }] } },
+  })
+  try {
+    await h.cmd("connect", { url: h.server.url, password: h.server.password })
+    // The idle conversation settles the first; the lane is free, so the waiting one goes.
+    await until(() => h.w.prompts.length === 1)
+    const body = lastPrompt(h)!.body as Sent
+    assert.deepEqual([body.text, body.files!.map((f) => f.name)], ["UI review note 2\nNote: b", ["note-2.jpg"]])
+    await until(() => h.notes() === "1:done 2:queued 3:queued")
+    // The one after it has nothing on disk to send: it fails when its turn comes, and says so.
+    turn(h, "ses_live")
+    await until(() => h.notes() === "1:done 2:done 3:failed")
+    assert.match(h.snap().review.notes[2]!.error ?? "", /screenshot is gone/)
+  } finally {
+    await h.close()
+  }
+})
+
 test("a gap in someone else's conversation does not re-read the one on screen", async () => {
   const h = await boot()
   try {
@@ -734,23 +813,27 @@ test("cancelNote: a waiting note leaves the queue of the conversation it was sen
     const old = await h.ready()
     h.server.route("DELETE", /\/inbox\//, {})
     const [a, b] = [h.note("a"), h.note("b")]
-    await until(() => h.w.prompts.length === 2)
-    h.agent.starts(old)
-    h.agent.picksUp(old, h.w.prompts[0]!.id)
-    await until(() => h.notes() === "1:working 2:queued")
-    await assert.rejects(h.cmd("cancelNote", a), /no longer waiting/, "only a waiting note")
+    await until(() => h.notes() === "1:queued 2:queued" && h.w.prompts.length === 1)
     await assert.rejects(h.cmd("cancelNote", "nope"), /no longer waiting/)
 
-    // Another conversation is open by now: the note's own is the one asked.
+    // The second waits in the app: no conversation has it, so the server is not asked.
+    await h.cmd("cancelNote", b)
+    assert.equal(h.notes(), "1:queued 2:failed")
+    assert.equal(h.server.requests.find((r) => r.method === "DELETE"), undefined)
+    assert.deepEqual([h.snap().review.notes[1]!.stopped, h.snap().review.notes[1]!.error], [true, "Cancelled."])
+
+    // The first is in a conversation's queue. Another conversation is open by now: the note's
+    // own is the one asked.
     await h.cmd("newSession")
     assert.notEqual(h.snap().session!.id, old)
-    await h.cmd("cancelNote", b)
+    await h.cmd("cancelNote", a)
     const del = h.server.requests.find((r) => r.method === "DELETE")!
-    assert.equal(del.path, `/api/session/${old}/inbox/${h.w.prompts[1]!.id}`)
-    h.emit("session.inbox.cancelled", old, { inboxID: h.w.prompts[1]!.id })
-    await until(() => h.notes() === "1:working 2:failed")
-    const row = h.snap().review.notes[1]!
+    assert.equal(del.path, `/api/session/${old}/inbox/${h.w.prompts[0]!.id}`)
+    h.emit("session.inbox.cancelled", old, { inboxID: h.w.prompts[0]!.id })
+    await until(() => h.notes() === "1:failed 2:failed")
+    const row = h.snap().review.notes[0]!
     assert.deepEqual([row.stopped, row.error], [true, "Cancelled."])
+    await assert.rejects(h.cmd("cancelNote", a), /no longer waiting/, "only a waiting note")
   } finally {
     await h.close()
   }
@@ -801,7 +884,7 @@ test("a canvas note: before and after pictures, the edits switched off only for 
     on = true
     h.page.message({ type: "edits-shown", id: "c1", show: true })
 
-    await until(() => h.notes() === "1:queued")
+    await until(() => h.notes() === "1:queued" && !!h.snap().review.notes[0]?.sent)
     const order = h.page.sent.filter((m) => m.type === "edits" || m.type === "captured").map((m) => (m.type === "edits" ? `edits:${m.show}` : "captured"))
     assert.deepEqual(order, ["edits:false", "edits:true", "captured"])
     const body = lastPrompt(h)!.body as Sent
@@ -829,7 +912,7 @@ test("a canvas note whose overlay never answers: it goes with the after picture 
     h.page.sent.length = 0
     const started = Date.now()
     h.page.message(canvasNote("c1", { text: "more room", bounds: null }))
-    await until(() => h.notes() === "1:queued", 5000)
+    await until(() => h.notes() === "1:queued" && !!h.snap().review.notes[0]?.sent, 5000)
     assert.ok(Date.now() - started >= 900, "it did wait for the overlay")
     const order = h.page.sent.filter((m) => m.type === "edits" || m.type === "captured").map((m) => (m.type === "edits" ? `edits:${m.show}` : "captured"))
     assert.deepEqual(order, ["edits:false", "edits:true", "captured"])
@@ -915,7 +998,7 @@ test("Retry of a canvas note sends its edits and both pictures again", async () 
     await until(() => h.page.sent.filter((m) => m.type === "edits").length === 2)
     on = true
     h.page.message({ type: "edits-shown", id: "c1", show: true })
-    await until(() => h.notes() === "1:queued")
+    await until(() => h.notes() === "1:queued" && !!h.snap().review.notes[0]?.sent)
     const first = lastPrompt(h)!.body as Sent & { id: string }
 
     h.agent.starts(s)
@@ -924,7 +1007,7 @@ test("Retry of a canvas note sends its edits and both pictures again", async () 
     h.agent.isStopped(s)
     await until(() => h.notes() === "1:failed")
     await h.cmd("retryNote", "c1")
-    await until(() => h.notes() === "1:queued")
+    await until(() => h.notes() === "1:queued" && !!h.snap().review.notes[0]?.sent)
 
     const again = lastPrompt(h)!.body as Sent & { id: string }
     assert.notEqual(again.id, first.id, "a new message")
@@ -954,7 +1037,7 @@ test("a note that is only new CSS rules is a note: named, pictured before and af
     await until(() => h.page.sent.filter((m) => m.type === "edits").length === 2)
     on = true
     h.page.message({ type: "edits-shown", id: "s1", show: true })
-    await until(() => h.notes() === "1:queued")
+    await until(() => h.notes() === "1:queued" && !!h.snap().review.notes[0]?.sent)
     const body = lastPrompt(h)!.body as Sent
     assert.deepEqual(body.files!.map((f) => `${f.name}=${jpegOf(f)}`), ["note-1-before.jpg=before", "note-1-after.jpg=after"])
     assert.ok(body.text.includes(`New CSS rules to add (put them where this project keeps its styles, renamed to its conventions if needed):\n\`\`\`css\n${css}\n\`\`\`\n`))
@@ -1008,8 +1091,8 @@ test("/compact: the request goes out, the summary streams into the conversation,
     h.server.route("POST", `/api/session/${s}/compact`, { json: { data: { id: "msg_c", type: "compaction", payload: {}, delivery: "steer" } } })
     h.note("a")
     h.note("b")
-    await until(() => h.w.prompts.length === 2)
-    const [m1, m2] = h.w.prompts.map((p) => p.id)
+    await until(() => h.notes() === "1:queued 2:queued" && h.w.prompts.length === 1)
+    const [m1] = h.w.prompts.map((p) => p.id)
     h.agent.starts(s)
     h.agent.picksUp(s, m1!)
     await until(() => h.notes() === "1:working 2:queued")
@@ -1040,10 +1123,10 @@ test("/compact: the request goes out, the summary streams into the conversation,
     assert.equal(h.notes(), "1:working 2:queued", "the summary's place in the queue is not a note's delivery")
     assert.equal(h.snap().session!.busy, true, "Stop still has something to stop")
 
-    // The run goes on where it was: the queued note is picked up and both finish.
-    h.agent.picksUp(s, m2!)
-    await until(() => h.notes() === "1:done 2:working")
+    // The run goes on where it was and ends; the waiting note then goes, as a turn of its own.
     h.agent.finishes(s)
+    await until(() => h.w.prompts.length === 2 && h.notes() === "1:done 2:queued")
+    turn(h, s)
     await until(() => h.notes() === "1:done 2:done")
 
     // Nothing to summarise is an answer in the conversation, and a refusal is passed on as it is.
@@ -1505,6 +1588,8 @@ test("a conversation is named after the first thing said in it, once; a name som
     await until(() => h.snap().session!.title === "Make the buy button bigger")
     assert.equal(h.w.sessions.get(s)!.title, "Make the buy button bigger", "the server has the name too")
     assert.deepEqual(h.snap().sessions.map((x) => [x.title, x.notes, x.said]), [["Make the buy button bigger", 1, "make the  buy button bigger.\nand greener"]])
+    turn(h, s)
+    await until(() => h.notes() === "1:done")
     h.note("the footer is too tall")
     await until(() => h.w.prompts.length === 2)
     await sleep(50)
@@ -1600,11 +1685,10 @@ test("a finished note shows what changed for it, and is taken back by asking the
     const s = await h.ready()
     h.note("a")
     h.note("b")
+    await until(() => h.w.prompts.length === 1)
+    turn(h, s)
     await until(() => h.w.prompts.length === 2)
-    h.agent.starts(s)
-    h.agent.picksUp(s, h.w.prompts[0]!.id)
-    h.agent.picksUp(s, h.w.prompts[1]!.id)
-    h.agent.finishes(s)
+    turn(h, s)
     await until(() => h.notes() === "1:done 2:done")
     const [a] = h.snap().review.notes
     assert.equal(a!.sent, true)
@@ -1654,8 +1738,8 @@ test("a note's row names its conversation; take back says which way it will go, 
     // The old conversation's newest message is note 2; the new one's is a typed message after note 3.
     const newestFirst = (s: string): object[] =>
       s === old
-        ? [{ id: h.w.prompts[1]!.id, type: "user", text: text(2) }, { id: h.w.prompts[0]!.id, type: "user", text: text(1) }]
-        : [{ id: "msg_typed", type: "user", text: "and the footer" }, { id: h.w.prompts[2]!.id, type: "user", text: text(3) }]
+        ? [{ id: h.w.prompts[1]?.id, type: "user", text: text(2) }, { id: h.w.prompts[0]?.id, type: "user", text: text(1) }]
+        : [{ id: "msg_typed", type: "user", text: "and the footer" }, { id: h.w.prompts[2]?.id, type: "user", text: text(3) }]
     h.server.route("GET", /^\/api\/session\/[^/]+\/message$/, (req) => {
       const list = newestFirst(req.path.split("/")[3]!)
       return { json: { data: req.query.get("order") === "desc" ? list : [...list].reverse(), cursor: { previous: null, next: null } } }
@@ -1664,11 +1748,10 @@ test("a note's row names its conversation; take back says which way it will go, 
 
     h.note("a")
     h.note("b")
+    await until(() => h.w.prompts.length === 1)
+    turn(h, old)
     await until(() => h.w.prompts.length === 2)
-    h.agent.starts(old)
-    h.agent.picksUp(old, h.w.prompts[0]!.id)
-    h.agent.picksUp(old, h.w.prompts[1]!.id)
-    h.agent.finishes(old)
+    turn(h, old)
     await until(() => h.notes() === "1:done 2:done")
     await h.cmd("newSession")
     const neu = h.snap().session!.id

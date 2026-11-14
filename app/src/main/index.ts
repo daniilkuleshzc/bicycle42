@@ -56,6 +56,7 @@ import { isPlaceholder, placeholderTitle, titleFrom } from "./naming"
 import { createOpenCode, type OpenCode } from "./opencode"
 import { createPage, type Page, type PageMessage } from "./page"
 import { createReview, imageUri, pageNote, type PageNote, type Review } from "./review"
+import { createOutbox, type Outgoing } from "./outbox"
 import { createShots } from "./shots"
 import { createStore, type SavedServer } from "./store"
 
@@ -72,6 +73,8 @@ app.setPath("userData", process.env.BICYCLE42_DATA || path.join(app.getPath("app
 
 const store = createStore(app.getPath("userData"), { log })
 const noteShots = createShots(app.getPath("userData"), log)
+/** What each unfinished note sends, on disk: a note waiting its turn, or one to retry, outlives a restart. */
+const outboxFiles = createOutbox(app.getPath("userData"), log)
 
 // ── secrets ─────────────────────────────────────────────────────────────────────────────────────
 // The server password is stored through the OS keychain when there is one. Without (a Linux box
@@ -145,7 +148,7 @@ function contextShown(): AppState["context"] {
 /** What each unfinished note was sent with, so it can be sent again. `id` is the message id the
  *  server knows it by: sending the same id twice queues it once, which makes a retry after a
  *  lost reply safe. Entries go when their note is done or removed. */
-const outbox = new Map<string, { text: string; files: PromptFile[]; id?: string }>()
+const outbox = new Map<string, Outgoing>()
 
 const siteSettings = (origin: string) => store.settings().sites[origin]
 
@@ -229,9 +232,14 @@ function toChat(event: ChatEvent) {
 
 /** A review changed: save it, redraw its pins if it is the one on screen, refresh the window. */
 function changed(s: Site) {
+  // A site of a server that was left meanwhile: its file belongs to that server, not this one.
+  if (sites.get(s.origin) !== s) return
   for (const id of outbox.keys()) {
     const status = noteSite(id)?.review.note(id)?.status
-    if (status === undefined || status === "done") outbox.delete(id)
+    if (status === undefined || status === "done") {
+      outbox.delete(id)
+      outboxFiles.drop(id)
+    }
   }
   store.saveReview(reviewKey(s.origin), s.review.toJSON())
   if (s === site) page?.send({ type: "pins", pins: pinsOf(s.review) })
@@ -727,6 +735,7 @@ async function settle(s: Site) {
     }
   }
   if (touched) changed(s)
+  pumpSite(s)
 }
 
 /** A conversation was deleted on the server. Its notes fail (with a way forward), and if it was
@@ -786,12 +795,20 @@ function onBackend(e: BackendEvent) {
         e.type === "inbox" ? s.review.inbox(e.session, e.id, e.status) : s.review.run(e.session, e.status, e.error)
       if (e.type === "run" && e.status !== "started" && s === site) void refreshRepo()
       if (e.type === "run" && e.status !== "started" && reversing.delete(e.session)) showFiles(s)
+      // The conversation is free: the next waiting note goes. Not after a stop or an error, which
+      // leave the rest waiting until something is sent again, as the server's own queue does.
+      if ((e.type === "run" && e.status === "succeeded") || (e.type === "inbox" && e.status === "cancelled")) pumpSite(s)
       if (!touched) return
       changed(s)
       // Show the agent's change: a page without hot reload still has the old pixels.
       if (s === site && s.review.autoReload && doneCount(s.review) > done) page?.reloadWhenIdle()
       // …and keep a picture of it, beside the one from when the note was made.
-      for (const id of doneIds(s.review)) if (!was.has(id)) afterPictures = afterPictures.then(() => afterPicture(s, id))
+      for (const id of doneIds(s.review)) {
+        if (was.has(id)) continue
+        afterPictures = afterPictures.then(() => afterPicture(s, id))
+        // (After a restart it is not in memory, so `changed` did not see it.)
+        outboxFiles.drop(id)
+      }
       return
     }
     case "session": {
@@ -1184,10 +1201,11 @@ async function onNote(s: Site, pn: PageNote) {
   }
   const shots = (before ? files.length - 1 : files.length) as 0 | 1 | 2
   const text = notePrompt(pn, note.n, { images: shots, references: pasted.length, before: !!before })
-  outbox.set(note.id, { text, files: [...files, ...pasted] })
+  const payload = { text, files: [...files, ...pasted] }
+  outbox.set(note.id, payload)
+  outboxFiles.save(note.id, payload)
   s.review.sending(note.id)
-  changed(s)
-  await deliver(s, note.id, note.lane)
+  await enqueue(s, note.id, note.lane)
 }
 
 /** How long the overlay gets to switch a canvas note's edits off or on. It answers two frames
@@ -1235,12 +1253,62 @@ async function beforePicture(id: string): Promise<NativeImage | undefined> {
   return shot
 }
 
+/** A note that is ready to go waits its turn, and goes at once when its lane is free. */
+async function enqueue(s: Site, id: string, lane: Lane) {
+  s.review.hold(id)
+  changed(s)
+  await pump(s, lane)
+}
+
+const pumping = new Set<string>()
+/** Sends the next waiting note of a lane, when the lane has none with the agent and its
+ *  conversation is not busy with something else (a message typed in the chat). One note is one
+ *  turn that way, so what the agent changed for it can be shown and taken back by itself. */
+async function pump(s: Site, lane: Lane) {
+  const key = `${s.origin}\n${lane}`
+  if (pumping.has(key)) return
+  pumping.add(key)
+  try {
+    for (;;) {
+      const next = s.review.next(lane)
+      // Out of reach: the notes wait until the server is back, which settles them and comes here.
+      // (So do the notes of a site whose server was left while this waited for an answer.)
+      if (!next || !backend || connection.status !== "online" || sites.get(s.origin) !== s) return
+      try {
+        const info = await backend.session(await laneSession(s, lane))
+        if (info?.busy) return
+      } catch (err) {
+        if (connection.status !== "online") return
+        s.review.failed(next.id, say(err))
+        changed(s)
+        continue
+      }
+      if (sites.get(s.origin) !== s || !s.review.release(next.id)) return
+      changed(s)
+      await deliver(s, next.id, lane)
+      // It could not be sent: the lane is still free for the one after it.
+      if (s.review.note(next.id)?.status !== "failed") return
+    }
+  } finally {
+    pumping.delete(key)
+  }
+}
+
+function pumpSite(s: Site) {
+  void pump(s, "main")
+  void pump(s, "bg")
+}
+
 async function deliver(s: Site, id: string, lane: Lane) {
-  const payload = outbox.get(id)
+  const payload = outbox.get(id) ?? outboxFiles.read(id)
   try {
     if (!payload) throw new Error("The app was restarted, so this note's screenshot is gone. Write the note again.")
+    outbox.set(id, payload)
     const target = await laneSession(s, lane)
-    payload.id ??= backend!.messageId()
+    if (!payload.id) {
+      payload.id = backend!.messageId()
+      outboxFiles.save(id, payload)
+    }
     const sent = await backend!.prompt(target, { id: payload.id, text: payload.text, files: payload.files })
     s.review.sent(id, sent.id, target)
     void autoName(target, s.review.rows().find((r) => r.id === id)?.text ?? "")
@@ -1524,7 +1592,7 @@ const commands: { [K in CommandName]: (...args: Parameters<Commands[K]>) => Retu
     const before = site.review.rows().map((r) => r.id)
     site.review.clearDone()
     const left = new Set(site.review.rows().map((r) => r.id))
-    for (const id of before) if (!left.has(id)) noteShots.drop(id)
+    for (const id of before) if (!left.has(id)) (noteShots.drop(id), outboxFiles.drop(id))
     changed(site)
   },
   async retryNote(id) {
@@ -1535,15 +1603,19 @@ const commands: { [K in CommandName]: (...args: Parameters<Commands[K]>) => Retu
     const accepted = !!s.review.note(id)?.message
     const note = s.review.retry(id)
     if (!note) return
-    const payload = outbox.get(id)
-    if (payload && accepted) delete payload.id
-    changed(s)
-    await deliver(s, note.id, note.lane)
+    const payload = outbox.get(id) ?? outboxFiles.read(id)
+    if (payload) {
+      if (accepted) delete payload.id
+      outbox.set(note.id, payload)
+      outboxFiles.save(note.id, payload)
+    }
+    await enqueue(s, note.id, note.lane)
   },
   removeNote(id) {
     if (!site) return
     site.review.remove(id)
     noteShots.drop(id)
+    if (typeof id === "string") outboxFiles.drop(id)
     changed(site)
   },
   notePictures(id) {
@@ -1836,7 +1908,10 @@ const commands: { [K in CommandName]: (...args: Parameters<Commands[K]>) => Retu
     await need().cancelQueued(needSession().id, item)
   },
   async cancelNote(id) {
-    const note = typeof id === "string" ? site?.review.note(id) : undefined
+    const s = site
+    const note = typeof id === "string" ? s?.review.note(id) : undefined
+    // Still waiting in the app: no conversation has it, so there is nothing to tell the server.
+    if (s && note && s.review.cancel(note.id)) return changed(s)
     if (!note?.session || !note.message || note.status !== "queued") throw new Error("This note is no longer waiting.")
     // The server's "cancelled" event is what moves the note; it arrives for any conversation.
     await need().cancelQueued(note.session, note.message)

@@ -964,3 +964,40 @@ test("a motion note: kept with the note, saved and read back, and named by its a
   // a transition with no words has nothing to send
   assert.equal(noteWords(pageNote(motionNote({ kind: "transition", name: "transition", selector: "b", label: "Button" }))!), "")
 })
+
+test("a note held in the app: it waits with no conversation, goes when its lane is free, and is still held after a restart", () => {
+  const r = createReview()
+  const [a, b, c] = [r.add(pn())!.id, r.add(pn())!.id, r.add(pn({ lane: "bg" } as Partial<PageNote>))!.id]
+  for (const id of [a, b, c]) (r.sending(id), r.hold(id))
+  assert.deepEqual(r.rows().map((x) => [x.status, x.sent, x.session]), [["queued", undefined, undefined], ["queued", undefined, undefined], ["queued", undefined, undefined]])
+  assert.deepEqual(r.sessions(), [], "no conversation owes anything for them")
+  assert.equal(r.inFlight(), true)
+
+  // The first of the lane goes; while it is on its way or with the agent, the next one waits.
+  assert.equal(r.next("main")?.id, a)
+  assert.equal(r.release(a)?.status, "sending")
+  assert.equal(r.next("main"), undefined)
+  r.sent(a, "m_a", A)
+  assert.equal(r.next("main"), undefined)
+  r.inbox(A, "m_a", "working")
+  assert.equal(r.next("main"), undefined)
+  // A run of that conversation ending finishes what it had, not what waits in the app.
+  r.run(A, "succeeded")
+  assert.deepEqual(r.rows().map((x) => x.status), ["done", "queued", "queued"])
+  assert.equal(r.next("main")?.id, b)
+
+  // Saved and read back, a held note is still held; one that only claims to be queued is not.
+  const back = createReview(JSON.parse(JSON.stringify(r.toJSON())))
+  assert.equal(back.next("main")?.id, b)
+  const stale = createReview({ version: REVIEW_VERSION, notes: [{ id: "x", n: 1, text: "x", status: "queued", lane: "main", anchor: {} }] })
+  assert.deepEqual([stale.rows()[0]!.status, stale.rows()[0]!.error], ["failed", RESTARTED])
+
+  // Taken out of the queue it is stopped, and no longer held; a failed one can go again.
+  assert.equal(r.cancel(b), true)
+  assert.equal(r.cancel(b), false)
+  assert.deepEqual([r.rows()[1]!.status, r.rows()[1]!.stopped], ["failed", true])
+  assert.equal(r.next("main"), undefined)
+  assert.equal(r.retry(b)?.status, "sending")
+  r.hold(b)
+  assert.equal(r.next("main")?.id, b)
+})

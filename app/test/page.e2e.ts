@@ -119,7 +119,7 @@ async function main() {
   check("state after load", s1.url === first && !s1.loading && s1.error === undefined && !s1.hmr, JSON.stringify(s1))
   check("nothing of ours to go back to", !s1.canGoBack && !s1.canGoForward)
   check("onChange was called along the way", changes > 0, `${changes} times`)
-  await until(() => js(`${shadow}?.querySelector('.root')?.classList.contains('on') ?? false`), 2000)
+  await until(() => js(`${shadow}?.querySelector('.pins')?.classList.contains('live') ?? false`), 2000)
 
   // The overlay sends a note two frames after Enter, and page.ts counts the Enter for a second: a
   // real window passes in ~30 ms. A view in a window never shown draws at its full rate only
@@ -455,7 +455,7 @@ async function main() {
   {
     const canvasUrl = moved.replace("page.html", "canvas.html")
     check("the canvas test page loads", (await readyAgain(() => page.load(canvasUrl))) && page.state().url === canvasUrl)
-    await until(() => js(`${shadow}?.querySelector('.root')?.classList.contains('on') ?? false`), 2000)
+    await until(() => js(`${shadow}?.querySelector('.pins')?.classList.contains('live') ?? false`), 2000)
     const SECOND = "#plans article:nth-of-type(2)"
     type Pt = { x: number; y: number }
     type Box = { x: number; y: number; width: number; height: number }

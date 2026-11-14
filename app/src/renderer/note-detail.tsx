@@ -231,7 +231,6 @@ function NoteDetail(props: { note: NoteRow }) {
             <div class="note-diff">
               <Changes changes={diff()!} />
             </div>
-            <p class="note-aside">Notes that waited together for the agent share a turn, so this may hold their changes too.</p>
           </Show>
         </Show>
         <Show when={error()}>
