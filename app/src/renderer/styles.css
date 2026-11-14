@@ -173,19 +173,22 @@ pre,
   }
 }
 
-.thin-scroll,
-.notes-list,
-.note-body,
-.repo-pop,
-.transcript,
-.asks,
-.menu,
-.rows,
-.diff,
-.output,
-.md pre {
-  scrollbar-width: thin;
-  scrollbar-color: var(--background-05) transparent;
+/* Thin scrollbars, a thumb and nothing else: the platform's thin ones keep their arrow buttons
+   on Linux, two at each end of every scrolling part. */
+:is(.thin-scroll, .notes-list, .note-body, .repo-pop, .transcript, .asks, .menu, .rows, .diff, .output, .md pre)::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+:is(.thin-scroll, .notes-list, .note-body, .repo-pop, .transcript, .asks, .menu, .rows, .diff, .output, .md pre)::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 4px;
+  background: var(--background-05);
+  background-clip: content-box;
+}
+
+:is(.thin-scroll, .notes-list, .note-body, .repo-pop, .transcript, .asks, .menu, .rows, .diff, .output, .md pre)::-webkit-scrollbar-button {
+  display: none;
 }
 
 /* ── controls ─────────────────────────────────────────────────────────────────────────────── */
@@ -1136,6 +1139,11 @@ details[open] > summary > .caret {
 .section-meta > span + span::before {
   content: "·";
   padding: 0 5px;
+  color: var(--muted);
+}
+
+.section-meta > .bad {
+  color: var(--ink-bad);
 }
 
 /* Every count in words while they fit; otherwise the short form that drops nothing (panel.tsx). */
@@ -1812,7 +1820,7 @@ details[open] > summary > .caret {
   display: flex;
   flex-direction: column;
   gap: 16px;
-  padding: 16px;
+  padding: 16px var(--gutter);
   line-height: 1.6;
   user-select: text;
   cursor: auto;
@@ -1900,6 +1908,20 @@ kbd {
 
 .user-line .badge {
   margin-top: 1px;
+}
+
+/* A note's message opens the note. */
+.user-note {
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+}
+
+.user-note:hover .user-text {
+  text-decoration: underline;
+  text-decoration-color: var(--background-03);
+  text-underline-offset: 3px;
 }
 
 .user-text {
@@ -2482,7 +2504,7 @@ details[open] > summary > .caret {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 8px;
+  padding: 8px var(--gutter);
 }
 
 .composer-box {

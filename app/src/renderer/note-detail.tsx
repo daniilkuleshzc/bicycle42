@@ -1,8 +1,9 @@
 // A note, open as a view of its own in the panel, over the list and the conversation: what it
 // says, its area before and after the agent's work, what the agent changed in the code for it,
-// and what the reviewer makes of the result (accept it, say more about it, take it back). The
+// and what the reviewer does about a result that is not right (say more about it, take it back);
+// one that is right needs nothing done. The
 // requests and the message box stay under it.
-import { For, Show, createEffect, createResource, createSignal, on, onMount } from "solid-js"
+import { For, Show, createEffect, createResource, createSignal, on, onCleanup, onMount } from "solid-js"
 import type { FileChange, NoteRow } from "../shared/types"
 import { Changes, Counts } from "./chat"
 import { Icon } from "./icons"
@@ -22,17 +23,27 @@ export function NoteView(props: { note: NoteRow }) {
     act("showNote", next.id)
   }
   let back!: HTMLButtonElement
-  onMount(() => back.focus())
+  let view!: HTMLDivElement
+  // Esc goes back from anywhere in the window, not only with the focus in the view. What is
+  // open over the panel takes the key first (a picture, a menu, the commit form), a request
+  // from the agent keeps its own keys, and a take-back question is put away before the view is.
+  const onEsc = (e: KeyboardEvent) => {
+    if (e.key !== "Escape" || e.defaultPrevented) return
+    const target = e.target instanceof Element ? e.target : null
+    if (target?.closest(".asks") || document.querySelector("dialog[open], .repo-pop, .meter-pop, .convo > .menu, .suggest")) return
+    e.preventDefault()
+    const keep = view.querySelector<HTMLButtonElement>("[data-keep]")
+    if (keep) keep.click()
+    else setOpenedNote("")
+  }
+  onMount(() => {
+    back.focus()
+    window.addEventListener("keydown", onEsc)
+  })
+  onCleanup(() => window.removeEventListener("keydown", onEsc))
 
   return (
-    <div
-      class="note-view"
-      onKeyDown={(e) => {
-        if (e.key !== "Escape" || e.defaultPrevented) return
-        e.preventDefault()
-        setOpenedNote("")
-      }}
-    >
+    <div class="note-view" ref={view}>
       <header class="note-view-head">
         <button class="note-back" ref={back} title="Back to the notes and the conversation (Esc)" onClick={() => setOpenedNote("")}>
           <Icon name="back" />
@@ -160,7 +171,7 @@ function NoteDetail(props: { note: NoteRow }) {
             {noteWord(n())}
           </span>
           <Show when={where()}>
-            <span class="note-where" title={`${where()}: Follow up and Take back act there.`}>
+            <span class="note-where" title={n().lane === "bg" ? `${where()}: Take back acts there; Follow up is said in the open conversation.` : `${where()}: Follow up and Take back act there.`}>
               {where()}
             </span>
           </Show>
@@ -202,7 +213,9 @@ function NoteDetail(props: { note: NoteRow }) {
         </Show>
         <Show when={n().sent && (n().status === "done" || n().status === "working")}>
           <button class="more-btn note-diff-btn" aria-expanded={!!diff()} disabled={loading()} onClick={toggleDiff}>
-            <Icon name={loading() ? "spinner" : diff() ? "up" : "down"} />
+            <Show when={loading()} fallback={<Icon name="right" class="caret" />}>
+              <Icon name="spinner" />
+            </Show>
             <Show when={diff()} fallback="What changed in the code">
               {(files) => (
                 <>
@@ -228,10 +241,9 @@ function NoteDetail(props: { note: NoteRow }) {
       {/* A waiting note is not in the conversation: this is where it is taken out of the queue. */}
       <Show when={n().status === "queued"}>
         <div class="note-acts">
-          <span class="note-wait">Waiting for its turn</span>
           <button
             class="btn note-cancel"
-            title="Take this note out of the queue"
+            title="The agent will not get this note; it stays on the list, stopped, with Retry"
             disabled={busy()}
             onClick={() => {
               setBusy(true)
@@ -242,20 +254,13 @@ function NoteDetail(props: { note: NoteRow }) {
                 .finally(() => setBusy(false))
             }}
           >
-            Cancel
+            Remove from queue
           </button>
         </div>
       </Show>
       {/* What can be done with it, always in reach under a long diff. */}
       <Show when={n().status === "done" || n().status === "failed"}>
-        <div
-          class="note-acts"
-          onKeyDown={(e) => {
-            if (e.key !== "Escape" || !sure()) return
-            e.preventDefault()
-            setSure(false)
-          }}
-        >
+        <div class="note-acts">
           <Show when={n().status === "failed"}>
             <button class="btn" onClick={() => act("retryNote", n().id)}>
               Retry
@@ -271,23 +276,18 @@ function NoteDetail(props: { note: NoteRow }) {
                 <>
                   <span class="note-ask">
                     {sure() === "undone"
-                      ? `Note ${n().n} is the newest message in its conversation, so it is undone exactly, files included. /redo there brings it back.`
-                      : `Note ${n().n} can't be undone exactly (only the newest message of an idle conversation can). The agent is asked to reverse it.`}
+                      ? `Note ${n().n} is the newest message in its conversation, so it can be undone exactly, files included (/redo there brings it back). Undo it?`
+                      : `Note ${n().n} can't be undone exactly: only the newest message of an idle conversation can. Ask the agent to reverse it?`}
                   </span>
                   <button class="btn danger" disabled={busy()} onClick={takeBack}>
-                    {sure() === "undone" ? "Undo it" : "Ask the agent"}
+                    {sure() === "undone" ? `Undo note ${n().n}` : "Ask to reverse"}
                   </button>
-                  <button class="btn" disabled={busy()} onClick={() => setSure(false)}>
-                    Keep
+                  <button class="btn" data-keep disabled={busy()} onClick={() => setSure(false)}>
+                    Keep it
                   </button>
                 </>
               }
             >
-              <Show when={!n().takenBack}>
-                <button class="btn" aria-pressed={!!n().accepted} title="The result is right" onClick={() => act("acceptNote", n().id, !n().accepted)}>
-                  <Icon name="check" /> {n().accepted ? "Accepted" : "Accept"}
-                </button>
-              </Show>
               <button
                 class="btn"
                 title={elsewhereToOpen() ? "Opens its conversation and starts a message about it there" : "Say more about it in the conversation"}

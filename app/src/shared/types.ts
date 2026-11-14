@@ -201,8 +201,6 @@ export type NoteRow = {
   /** Which pictures of its area there are (`notePictures`): the one from when it was made, or
    *  that and the one taken when the agent was done. */
   pictures?: "before" | "both"
-  /** The reviewer looked at the result and it is right. */
-  accepted?: true
   /** What the agent did for it was taken back: "undone" with the conversation (it can still be
    *  brought back), or the agent was "asked" to reverse it. */
   takenBack?: "undone" | "asked"
@@ -364,7 +362,6 @@ export type Commands = {
    *  of. Notes that waited together for the agent share a turn, and so a diff. */
   noteDiff(id: string): FileChange[]
   /** The result is right (or, with false, not looked at after all). */
-  acceptNote(id: string, accepted: boolean): void
   /** Takes back what the agent did for a finished note. The newest message of its conversation
    *  is undone exactly, files included ("undone": /redo brings it back); for an older one the
    *  agent is asked to reverse its change ("asked"). */

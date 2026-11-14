@@ -77,8 +77,8 @@ export type Review = {
   note(id: string): Note | undefined
   rows(): NoteRow[]
   /** What the reviewer, or the app, says of a note beside its status: which pictures it has,
-   *  that it was accepted, that it was taken back. `undefined` clears. True when it changed. */
-  mark(id: string, change: { pictures?: Note["pictures"]; accepted?: true | undefined; takenBack?: Note["takenBack"] }): boolean
+   *  that it was taken back. `undefined` clears. True when it changed. */
+  mark(id: string, change: { pictures?: Note["pictures"]; takenBack?: Note["takenBack"] }): boolean
   /** The words of every note a conversation accepted, by conversation: what the list of
    *  conversations counts and searches. */
   said(): Array<{ session: string; text: string }>
@@ -353,7 +353,6 @@ function savedNote(raw: unknown): Note | undefined {
   const motion = pageMotion(raw.motion)
   if (motion) note.motion = motion
   if (raw.pictures === "before" || raw.pictures === "both") note.pictures = raw.pictures
-  if (raw.accepted === true) note.accepted = true
   if (raw.takenBack === "undone" || raw.takenBack === "asked") note.takenBack = raw.takenBack
   const shot = isObj(raw.shot) ? raw.shot : undefined
   const v = shot && isObj(shot.viewport) ? shot.viewport : undefined
@@ -585,7 +584,7 @@ export function createReview(saved?: unknown): Review {
       const note = find(id)
       if (!note) return false
       let touched = false
-      for (const key of ["pictures", "accepted", "takenBack"] as const) {
+      for (const key of ["pictures", "takenBack"] as const) {
         if (!(key in change) || note[key] === change[key]) continue
         if (change[key] === undefined) delete note[key]
         else (note as Record<string, unknown>)[key] = change[key]
@@ -607,7 +606,6 @@ export function createReview(saved?: unknown): Review {
         ...(n.error ? { error: n.error } : {}),
         ...(n.session && n.message ? { sent: true as const, session: n.session } : {}),
         ...(n.pictures ? { pictures: n.pictures } : {}),
-        ...(n.accepted ? { accepted: true as const } : {}),
         ...(n.takenBack ? { takenBack: n.takenBack } : {}),
         ...(n.status === "failed" && (n.error === ERR.interrupted || n.error === ERR.cancelled) ? { stopped: true as const } : {}),
         ...(unplaced.includes(n.id) ? { lost: true as const } : {}),

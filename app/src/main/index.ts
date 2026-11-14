@@ -1360,7 +1360,7 @@ const builtins: Record<string, Builtin> = {
     // The note it was says so in the list, until /redo.
     for (const s of sites.values()) {
       const row = s.review.rows().find((r) => s.review.note(r.id)?.message === turn.id && s.review.note(r.id)?.session === current.id && r.status === "done")
-      if (row && s.review.mark(row.id, { takenBack: "undone", accepted: undefined })) changed(s)
+      if (row && s.review.mark(row.id, { takenBack: "undone" })) changed(s)
     }
     // A note cannot be sent again from the message box; a typed message can, so it comes back.
     return { say: `Took back ${what}. /redo brings it back; your next message makes it final.`, ...(turn.note ? {} : { draft: turn.text }) }
@@ -1554,11 +1554,6 @@ const commands: { [K in CommandName]: (...args: Parameters<Commands[K]>) => Retu
     if (!note?.session || !note.message) throw new Error("This note has not reached the agent.")
     return need().diff(note.session, note.message)
   },
-  acceptNote(id, accepted) {
-    const s = site
-    if (typeof id !== "string" || !s || s.review.note(id)?.status !== "done") return
-    if (s.review.mark(id, { accepted: accepted ? true : undefined })) changed(s)
-  },
   async takeBackWay(id) {
     return (await takeBack(id)).how
   },
@@ -1575,7 +1570,7 @@ const commands: { [K in CommandName]: (...args: Parameters<Commands[K]>) => Retu
       await b.prompt(note.session, { text: takeBackPrompt(note.n, note.text, diff) })
       reversing.add(note.session)
     }
-    s.review.mark(note.id, { takenBack: how, accepted: undefined })
+    s.review.mark(note.id, { takenBack: how })
     changed(s)
     return how
   },
@@ -1621,7 +1616,7 @@ const commands: { [K in CommandName]: (...args: Parameters<Commands[K]>) => Retu
       let touched = false
       for (const row of s.review.rows()) {
         const note = s.review.note(row.id)
-        if (note?.session === cp.session && note.message && gone.has(note.message) && note.status === "done") touched = s.review.mark(row.id, { takenBack: "undone", accepted: undefined }) || touched
+        if (note?.session === cp.session && note.message && gone.has(note.message) && note.status === "done") touched = s.review.mark(row.id, { takenBack: "undone" }) || touched
       }
       if (touched) changed(s)
     }

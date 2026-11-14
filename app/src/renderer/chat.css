@@ -536,22 +536,13 @@
 
 /* ── buttons: question card, stop ─────────────────────────────────────────────────────────── */
 
-/* Filled either way: a quiet fill while nothing is chosen, the accent once something is. */
-.answer-btn:not(.ready) {
-  background: var(--surface-strong);
-  border-color: var(--surface-strong);
+/* The primary button once something is chosen; until then an outline, which says why when
+   it is pressed. */
+.answer-btn:not(.ready),
+.answer-btn:not(.ready):not(:disabled):hover {
+  background: transparent;
+  border-color: var(--background-05);
   color: var(--muted);
-  cursor: help;
-}
-
-.answer-btn.ready {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--background);
-}
-
-.answer-btn.ready:not(:disabled):hover {
-  background: color-mix(in srgb, var(--accent) 85%, var(--foreground));
 }
 
 .btn.ghost {
@@ -1170,9 +1161,10 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* The one part that scrolls. */
+/* The one part that scrolls. It is as tall as what it holds, so what can be done with a short
+   note sits right under it, and under a long one stays at the panel's foot. */
 .note-body {
-  flex: 1;
+  flex: 0 1 auto;
   min-height: 0;
   overflow-y: auto;
   display: flex;
@@ -1271,18 +1263,8 @@
   border-top: 1px solid var(--rule);
 }
 
-.note-acts .btn[aria-pressed="true"] {
-  background: var(--surface-strong);
-}
-
-.note-acts .note-undo,
-.note-acts .note-cancel {
+.note-acts .note-undo {
   margin-left: auto;
-}
-
-.note-wait {
-  font-size: var(--text-control);
-  color: var(--muted);
 }
 
 .note-ask {

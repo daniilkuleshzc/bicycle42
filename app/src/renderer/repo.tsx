@@ -11,10 +11,9 @@ const oneLine = (text: string, max = 68) => {
   return line.length > max ? `${line.slice(0, max - 1)}…` : line
 }
 
-/** A commit message from the notes: the accepted ones when any are, else all that are done. */
+/** A commit message from the notes that are done and were not taken back. */
 export function commitMessage(notes: typeof state.review.notes): string {
-  const done = notes.filter((n) => n.status === "done" && !n.takenBack)
-  const picked = done.some((n) => n.accepted) ? done.filter((n) => n.accepted) : done
+  const picked = notes.filter((n) => n.status === "done" && !n.takenBack)
   if (!picked.length) return ""
   if (picked.length === 1) return capital(oneLine(picked[0]!.text))
   return [`UI review: ${picked.length} notes`, "", ...picked.map((n) => `- ${oneLine(n.text, 100)}`)].join("\n")

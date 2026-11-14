@@ -1594,7 +1594,7 @@ test("the list: a pin goes first and is saved; archiving or deleting the open co
 
 // ── a finished note: the verdict, the diff, taking it back; checkpoints; the repo ───────────────
 
-test("a finished note is accepted, shows what changed for it, and is taken back by asking the agent", async () => {
+test("a finished note shows what changed for it, and is taken back by asking the agent", async () => {
   const h = await boot()
   try {
     const s = await h.ready()
@@ -1609,8 +1609,6 @@ test("a finished note is accepted, shows what changed for it, and is taken back 
     const [a] = h.snap().review.notes
     assert.equal(a!.sent, true)
 
-    await h.cmd("acceptNote", a!.id, true)
-    assert.equal(h.snap().review.notes[0]!.accepted, true)
     assert.deepEqual(await h.cmd("noteDiff", a!.id), [{ file: "src/a.css", patch: `@@ -1 +1 @@\n-a\n+b ${h.w.prompts[0]!.id}`, additions: 1, deletions: 1 }])
 
     // Not the newest message (the fake server lists none): the agent is asked, in the note's conversation.
@@ -1632,7 +1630,7 @@ test("a finished note is accepted, shows what changed for it, and is taken back 
     assert.equal(reloads(), shown + 1)
     assert.equal(h.w.prompts[2]!.session, s)
     const row = h.snap().review.notes[0]!
-    assert.deepEqual([row.status, row.takenBack, row.accepted], ["done", "asked", undefined])
+    assert.deepEqual([row.status, row.takenBack], ["done", "asked"])
     await assert.rejects(h.cmd("takeBackNote", a!.id), /already taken back/)
     await assert.rejects(h.cmd("noteDiff", "nope"), /has not reached the agent/)
     // The verdict is saved with the note.

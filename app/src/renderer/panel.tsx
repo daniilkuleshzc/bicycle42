@@ -47,7 +47,7 @@ const WORD: Record<Shown, string> = {
 }
 
 /** The word for a note's state, as its row and its own view say it. */
-export const noteWord = (note: NoteRow): string => (note.takenBack ? "taken back" : note.accepted ? "accepted" : WORD[noteShown(note)])
+export const noteWord = (note: NoteRow): string => (note.takenBack ? "taken back" : WORD[noteShown(note)])
 
 /** Every count comes from the one tally in store.ts. */
 export type Counts = ReturnType<typeof tallyNotes>
@@ -155,6 +155,27 @@ function Notes(props: { listHeight: number; open: boolean; onToggle: () => void;
       })
     }),
   )
+  // A note that has just failed may be below the list's edge: it is brought into view and
+  // pointed at, as a clicked pin's row is.
+  let failedBefore: Set<string> | undefined
+  createEffect(() => {
+    const failed = new Set(state.review.notes.filter((n) => shownStatus(n) === "failed").map((n) => n.id))
+    const before = failedBefore
+    failedBefore = failed
+    // Not for a list that arrives with its failures already in it.
+    const fresh = before && [...failed].find((id) => !before.has(id))
+    if (!fresh || openedNote()) return
+    requestAnimationFrame(() => {
+      const row = rows.get(fresh)
+      if (!row) return
+      // The row just grew by the line that says why: fit the list to whole rows first.
+      measure()
+      row.scrollIntoView({ block: "nearest" })
+      row.classList.remove("flash")
+      void row.offsetWidth
+      row.classList.add("flash")
+    })
+  })
   const lostLabel = () =>
     state.review.unplaced === 1 ? "1 pin can't find its element" : `${state.review.unplaced} pins can't find their element`
 
@@ -174,7 +195,7 @@ function Notes(props: { listHeight: number; open: boolean; onToggle: () => void;
             title={`${counts().total} notes: ${countWords(counts()).join(", ")}. ${LEGEND}`}
           >
             <For each={countWords(counts())} fallback={<span>none yet</span>}>
-              {(part) => <span>{part}</span>}
+              {(part) => <span classList={{ bad: part.endsWith(" failed") }}>{part}</span>}
             </For>
           </span>
           <span
@@ -182,7 +203,9 @@ function Notes(props: { listHeight: number; open: boolean; onToggle: () => void;
             classList={{ hide: !tight() }}
             title={`${counts().total} notes: ${countWords(counts()).join(", ")}. ${LEGEND}`}
           >
-            {shortWords(counts()) || "none yet"}
+            <For each={(shortWords(counts()) || "none yet").split(" · ")}>
+              {(part) => <span classList={{ bad: part.endsWith(" failed") }}>{part}</span>}
+            </For>
           </span>
         </button>
         <Show when={state.review.unplaced > 0}>
@@ -267,18 +290,9 @@ function Notes(props: { listHeight: number; open: boolean; onToggle: () => void;
                           </span>
                         </Show>
                         {/* The badge's colour says waiting; a word is kept for what says more. */}
-                        <Show
-                          when={note.accepted && !note.takenBack}
-                          fallback={
-                            <Show when={note.takenBack || shown() !== "queued"}>
-                              <span class="note-status" data-status={shown()}>
-                                {noteWord(note)}
-                              </span>
-                            </Show>
-                          }
-                        >
-                          <span class="note-lost" title="Accepted">
-                            <Icon name="check" />
+                        <Show when={note.takenBack || shown() !== "queued"}>
+                          <span class="note-status" data-status={shown()}>
+                            {noteWord(note)}
                           </span>
                         </Show>
                       </button>

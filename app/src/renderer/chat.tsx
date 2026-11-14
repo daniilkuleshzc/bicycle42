@@ -23,7 +23,7 @@ import { ServerButton } from "./connect"
 import { openLightbox } from "./lightbox"
 import { Markdown } from "./markdown"
 import { RepoBar } from "./repo"
-import { act, chat, focusedNote, keys, mac, message, b42, setNotice, setSwitcherOpen, state } from "./store"
+import { act, chat, focusedNote, keys, mac, message, b42, setNotice, setOpenedNote, setSwitcherOpen, state } from "./store"
 
 // ── diffs ───────────────────────────────────────────────────────────────────────────────────────
 
@@ -117,7 +117,7 @@ export function Changes(props: { changes: FileChange[] }) {
               </pre>
               <Show when={lines().length > FOLD}>
                 <button class="more-btn diff-more" aria-expanded={all()} onClick={() => setAll(!all())}>
-                  <Icon name={all() ? "up" : "down"} />
+                  <Icon name="right" class="caret" />
                   {all() ? "Show fewer lines" : `Show all ${lines().length} lines`}
                 </button>
               </Show>
@@ -284,16 +284,38 @@ const noteStatus = createRoot(() =>
 function User(props: { item: ChatUser }) {
   return (
     <div class="msg user" classList={{ pending: props.item.pending }} data-item={props.item.id}>
-      <div class="user-line">
-        <Show when={props.item.note}>
-          {(note) => (
-            <span class="badge" data-status={noteStatus().get(note().n) ?? "gone"}>
-              {note().n}
+      <Show
+        when={props.item.note && state.review.notes.find((n) => n.n === props.item.note!.n)}
+        fallback={
+          <div class="user-line">
+            <Show when={props.item.note}>
+              {(note) => (
+                <span class="badge" data-status="gone">
+                  {note().n}
+                </span>
+              )}
+            </Show>
+            <div class="user-text">{props.item.note?.text ?? props.item.text}</div>
+          </div>
+        }
+      >
+        {/* A note still on the list opens from its message as it does from its row. */}
+        {(row) => (
+          <button
+            class="user-line user-note"
+            title={`Open note ${row().n}`}
+            onClick={() => {
+              act("showNote", row().id)
+              setOpenedNote(row().id)
+            }}
+          >
+            <span class="badge" data-status={noteStatus().get(row().n) ?? "gone"}>
+              {row().n}
             </span>
-          )}
-        </Show>
-        <div class="user-text">{props.item.note?.text ?? props.item.text}</div>
-      </div>
+            <span class="user-text">{props.item.note!.text}</span>
+          </button>
+        )}
+      </Show>
       <Show when={props.item.images.length}>
         <div class="thumbs">
           <For each={props.item.images}>
@@ -485,7 +507,6 @@ const [chatSize, setChatSize] = createSignal({ width: 400, height: 800 })
 /** "1 of 3" when more than one request waits. Only the first is shown, so they never crowd out
  *  the conversation; the next one takes its place once this one is answered. */
 function Count(props: { count: number; note?: number }) {
-  const more = () => props.count - 1
   return (
     <Show when={props.count > 1 || props.note}>
       <p class="ask-count">
@@ -494,7 +515,6 @@ function Count(props: { count: number; note?: number }) {
         </Show>
         <Show when={props.count > 1}>
           <span class="ask-of">1 of {props.count}</span>
-          <span>{more() === 1 ? "one more after this" : `${more()} more after this`}</span>
         </Show>
       </p>
     </Show>
@@ -546,8 +566,8 @@ function Permission(props: { ask: PermissionAsk; count: number }) {
       aria-label="The agent asks for permission"
       onKeyDown={(e) => {
         if (busy() || e.isComposing) return
-        if (e.key === "Escape") reply("reject")
-        else if (e.key === "Enter" && modKey(e)) reply("always")
+        // Esc is not an answer: it means "back" everywhere else in the panel.
+        if (e.key === "Enter" && modKey(e)) reply("always")
         // On a button, Enter presses that button.
         else if (e.key === "Enter" && !e.shiftKey && !(e.target instanceof HTMLButtonElement)) reply("once")
         else return
@@ -589,7 +609,7 @@ function Permission(props: { ask: PermissionAsk; count: number }) {
           </div>
         </Show>
         <button class="more-btn" aria-expanded={showDiff()} onClick={() => setShowDiff(!showDiff())}>
-          <Icon name={showDiff() ? "up" : "down"} />
+          <Icon name="right" class="caret" />
           {showDiff() ? "Hide the change" : "Show the change"}
           <Show when={!showDiff()}>
             <Counts additions={totals().additions} deletions={totals().deletions} />
@@ -606,7 +626,7 @@ function Permission(props: { ask: PermissionAsk; count: number }) {
         <button class="btn" disabled={busy()} title={`Always allow (${keys("mod", "enter")})`} onClick={() => reply("always")}>
           Always allow
         </button>
-        <button class="btn" disabled={busy()} title="Deny (Esc)" onClick={() => reply("reject")}>
+        <button class="btn" disabled={busy()} title="Deny" onClick={() => reply("reject")}>
           Deny
         </button>
       </div>
@@ -735,13 +755,15 @@ function Ask(props: { question: Question; count: number }) {
       aria-label="The agent asks a question"
       onSubmit={(e) => {
         e.preventDefault()
-        if (answer().complete && !busy()) settle(b42.invoke("answerQuestion", props.question.id, answer().out))
+        if (busy()) return
+        // Pressed with a question still open: it says so, where a failure would be said.
+        if (!answer().complete) return void setError("Choose an answer first.")
+        settle(b42.invoke("answerQuestion", props.question.id, answer().out))
       }}
       onKeyDown={(e) => {
         if (busy() || e.isComposing) return
-        if (e.key === "Escape") settle(b42.invoke("dismissQuestion", props.question.id))
         // Enter answers from anywhere in the form (a text field already does so by itself).
-        else if (e.key === "Enter" && !e.shiftKey && !(e.target instanceof HTMLButtonElement) && !(e.target instanceof HTMLInputElement && e.target.type !== "checkbox" && e.target.type !== "radio"))
+        if (e.key === "Enter" && !e.shiftKey && !(e.target instanceof HTMLButtonElement) && !(e.target instanceof HTMLInputElement && e.target.type !== "checkbox" && e.target.type !== "radio"))
           e.currentTarget.requestSubmit()
         else return
         e.preventDefault()
@@ -770,7 +792,7 @@ function Ask(props: { question: Question; count: number }) {
       <div class="ask-actions">
         {/* Always the primary action; until something is chosen it waits, and says why. */}
         <button
-          class="btn answer-btn"
+          class="btn primary answer-btn"
           classList={{ ready: answer().complete }}
           type="submit"
           disabled={busy()}
@@ -783,7 +805,6 @@ function Ask(props: { question: Question; count: number }) {
           class="btn ghost"
           type="button"
           disabled={busy()}
-          title="Esc"
           onClick={() => settle(b42.invoke("dismissQuestion", props.question.id))}
         >
           Dismiss

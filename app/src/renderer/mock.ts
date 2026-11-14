@@ -196,7 +196,7 @@ function notes(): NoteRow[] {
     ...extra,
   })
   return [
-    row(1, "pl-8", "done", { pictures: "both", accepted: true }),
+    row(1, "pl-8", "done", { pictures: "both" }),
     row(2, "hide on mobile", "done", { pictures: "before", takenBack: "asked" }),
     row(3, "make this the primary button style", "done", { pictures: "both" }),
     row(4, "too much space between the heading and the paragraph, should match the cards below", "working"),
@@ -941,14 +941,6 @@ export function install(scenario: string, params: URLSearchParams): Bridge {
       { file: "src/components/pricing/PlanCard.tsx", additions: 3, deletions: 2, patch: "@@ -12,7 +12,8 @@ export function PlanCard(props) {\n   return (\n     <article class=\"plan\">\n-      <button class=\"btn\">Start free trial</button>\n-      <p class=\"fine\">No card needed</p>\n+      <button class=\"btn btn-lg\">Start free trial</button>\n+      <p class=\"fine\">No card needed.</p>\n+      <p class=\"fine\">Cancel any time.</p>\n     </article>\n   )" },
       { file: "src/styles/buttons.css", additions: 4, deletions: 0, patch: "@@ -40,3 +40,7 @@\n .btn:hover {\n   filter: brightness(1.05);\n }\n+.btn-lg {\n+  height: 48px;\n+  padding: 0 20px;\n+}" },
     ],
-    acceptNote(id, accepted) {
-      state.review.notes = state.review.notes.map((n) => {
-        if (n.id !== id) return n
-        const { accepted: _was, ...rest } = n
-        return accepted ? { ...rest, accepted: true as const } : rest
-      })
-      push()
-    },
     takeBackWay: (id) => takeBackWay(id),
     takeBackNote(id) {
       const how = takeBackWay(id)
