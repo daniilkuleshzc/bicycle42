@@ -180,7 +180,7 @@ a skill or a helper agent.
 
 ## Not built yet
 
-- Signed builds and installers.
+- A Developer ID signature, Intel builds, and Windows and Linux packages.
 - Tabs and device widths.
 - Edit mode: adding elements, moving one into another container, reordering in block flow.
 
