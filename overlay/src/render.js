@@ -122,10 +122,11 @@ export function render() {
   }
 }
 
-// Draw every frame only while a note is being made or the reviewer is doing something (outlines
-// must follow the layout as it moves). Otherwise the layer redraws when something says it may
-// have moved: DOM changes, scroll, resize. A slow tick covers what none of those report (CSS
-// animations, late-loading images), so idle pins cost a few redraws a second, not sixty. With
+// Draw every frame only while the reviewer is doing something, for half a second after the page
+// changed or scrolled (outlines must follow the layout as it moves), during a capture or a drag,
+// and while what is selected is being animated. A selection or a note that only sits there is
+// no reason: then the layer redraws on the slow tick, which covers what nothing reports (late
+// images, a style the page's script set), so it costs a few redraws a second, not sixty. With
 // review off and no pins nothing is drawn at all: input, scroll and DOM changes ask for nothing.
 const IDLE_TICK_MS = 250;
 const ACTIVE_MS = 500;
@@ -137,16 +138,29 @@ export function active() {
   lastInput = performance.now();
   kick();
 }
-/** The page changed or scrolled under the layer. */
+/** The page changed or scrolled under the layer. With review on, as input does: frames for the
+ *  next half second. With pins only, one frame to put them where their elements went. */
 export function moved() {
-  if (S.enabled || S.pins.length) kick();
+  if (S.enabled) active();
+  else if (S.pins.length) kick();
+}
+/** A CSS animation or transition (or one the page's script started) is running on one of the
+ *  elements or on an ancestor of one: its outline has to follow it every frame. One list for
+ *  the whole document, read only when nothing else keeps the frames going. */
+export function animating(els) {
+  if (!els.some((el) => el && el.isConnected)) return false;
+  for (const a of document.getAnimations()) {
+    const t = a.playState === "running" && a.effect && /** @type {KeyframeEffect} */ (a.effect).target;
+    if (t && els.some((el) => el && t.contains(el))) return true;
+  }
+  return false;
 }
 function frame() {
   raf = 0;
   render();
   // Through kick(): something in render() may have asked for the next frame already, and a
   // second request here would start a second chain (two renders a frame until the selection goes).
-  if (S.card || S.sel.length || S.drag || S.pending || Canvas.busyFrames() || Motion.busyFrames() || performance.now() - lastInput < ACTIVE_MS)
+  if (S.drag || S.pending || Canvas.busyFrames() || Motion.busyFrames() || performance.now() - lastInput < ACTIVE_MS || (S.enabled && animating(S.sel)))
     kick();
   else if ((S.enabled || S.pins.length) && !idleTimer)
     idleTimer = setTimeout(() => {

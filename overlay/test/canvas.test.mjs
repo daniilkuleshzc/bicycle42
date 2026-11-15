@@ -1483,7 +1483,7 @@ test("one chain of frames: a drag that selects its element does not leave the la
   await drag(page, f, b.x + 100, b.y + 80, b.x - 150, b.y + 80);
   assert.equal(await ui(f, (r) => r.querySelector(".ipath").textContent), "Card · Pro For small teams");
   await frames(f, 40); // past the half second in which the pointer still counts as moving
-  const per = await f.evaluate(() => new Promise((done) => {
+  const perFrame = () => f.evaluate(() => new Promise((done) => {
     const real = window.requestAnimationFrame;
     let asked = 0, left = 30;
     window.requestAnimationFrame = (cb) => {
@@ -1497,6 +1497,12 @@ test("one chain of frames: a drag that selects its element does not leave the la
     };
     real.call(window, step);
   }));
+  // A selection that sits still is drawn on the slow tick only.
+  const still = await perFrame();
+  assert.ok(still < 0.3, `${still.toFixed(2)} frames asked for per frame while nothing moves`);
+  // Animated, it is drawn every frame: once a frame, not twice.
+  await f.evaluate((sel) => document.querySelector(sel).animate([{ translate: "0 0" }, { translate: "0 4px" }], { duration: 800, iterations: Infinity }), SECOND);
+  const per = await perFrame();
   assert.ok(per > 0.8 && per < 1.2, `${per.toFixed(2)} frames asked for per frame (two chains: 2)`);
   await page.close();
 });
