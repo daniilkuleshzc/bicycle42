@@ -6,7 +6,7 @@ import { finishCapture, refuseCapture } from "./sent.js";
 import * as Canvas from "./canvas/api.js";
 import * as Motion from "./motion/api.js";
 import { hostMode, retellMode } from "./mode.js";
-import { blockIfActive, isOurs, LEFT_FOR_US, leftForUs, onKeyDown, onPointerDown, onPointerMove, onPointerUp, OURS_ONLY, oursOnly, setEnabled, setPins } from "./input.js";
+import { blockIfActive, isOurs, LEFT_FOR_US, leftForUs, onKeyDown, onPointerDown, onPointerMove, onPointerUp, onPointerCancel, OURS_ONLY, oursOnly, setEnabled, setPins } from "./input.js";
 import { active, kick, moved } from "./render.js";
 import STYLES from "./styles.css"; // its text: the build loads a stylesheet as a string
 
@@ -115,6 +115,7 @@ function mount() {
   window.addEventListener("pointerdown", onPointerDown, opts);
   window.addEventListener("pointermove", onPointerMove, opts);
   window.addEventListener("pointerup", onPointerUp, opts);
+  window.addEventListener("pointercancel", onPointerCancel, opts);
   for (const t of ["mousedown", "mouseup", "click", "dblclick", "auxclick", "dragstart", "selectstart", "touchstart"])
     window.addEventListener(t, blockIfActive, opts);
   window.addEventListener("keydown", onKeyDown, opts);

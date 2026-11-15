@@ -89,6 +89,15 @@ export function onPointerUp(e) {
   current().pointerUp(e);
 }
 
+/** The browser took the pointer away (a system gesture, the window losing it): a canvas drag
+ *  is undone, as Escape does, and a note's stroke, area or press is dropped. */
+export function onPointerCancel(e) {
+  if (!S.enabled) return;
+  const mode = /** @type {any} */ (current()); // (motion mode has none: its release only blocks)
+  if (mode.pointerCancel) mode.pointerCancel();
+  else mode.pointerUp(e);
+}
+
 export function blockIfActive(e) {
   if (!S.enabled || isOurs(e)) return;
   // While text is edited in place, the mouse works inside it (caret, selection); the page's own

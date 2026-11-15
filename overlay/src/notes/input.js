@@ -52,6 +52,14 @@ export function pointerMove(e) {
   kick();
 }
 
+/** The pointer was taken away mid-gesture: what was being drawn or dragged is dropped, and a
+ *  press that never ended is no click. */
+export function pointerCancel() {
+  if (!S.drag) return;
+  S.drag = null;
+  kick();
+}
+
 export function pointerUp(e) {
   const d = S.drag;
   if (!d) return;

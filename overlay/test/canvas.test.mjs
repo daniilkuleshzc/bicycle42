@@ -667,6 +667,18 @@ test("Esc cancels a drag; nothing is ever sent without Enter", async () => {
   assert.equal((await box(f, SECOND)).width, 200);
   assert.equal(await field(f, "css").inputValue(), "");
   assert.equal(await f.evaluate((s) => document.querySelector(s).getAttribute("style"), SECOND), null, "no style attribute is left behind");
+  // The browser taking the pointer away (a system gesture) undoes it the same way.
+  await page.mouse.move(b.x + b.width, b.y + 30);
+  await page.mouse.down();
+  await page.mouse.move(b.x + b.width + 60, b.y + 30, { steps: 5 });
+  await frames(f);
+  assert.equal((await box(f, SECOND)).width, 260);
+  await f.evaluate(() => window.dispatchEvent(new PointerEvent("pointercancel", { pointerId: 1, bubbles: true })));
+  await page.mouse.up();
+  await frames(f);
+  assert.equal((await box(f, SECOND)).width, 200, "pointercancel puts the width back");
+  assert.equal(await field(f, "css").inputValue(), "");
+  assert.equal(await f.evaluate((s) => document.querySelector(s).getAttribute("style"), SECOND), null, "no style attribute or live property is left behind");
   // every other way of making edits, and the bar's buttons: no note
   await drag(page, f, b.x + b.width, b.y + 30, b.x + b.width + 40, b.y + 30);
   await f.locator("b42-review .undo").click();
@@ -1509,6 +1521,14 @@ test("one chain of frames: a drag that selects its element does not leave the la
   await frames(f, 30); // the slow tick sees it within 250 ms, and the frames start then
   const per = await perFrame();
   assert.ok(per > 0.8 && per < 1.2, `${per.toFixed(2)} frames asked for per frame (two chains: 2)`);
+  // An animation inside the selection (a panel opening in it) moves its outline too: every frame.
+  await f.evaluate((sel) => document.querySelector(sel).getAnimations().forEach((a) => a.cancel()), SECOND);
+  await frames(f, 40);
+  assert.ok((await perFrame()) < 0.3, "still again once the animation is gone");
+  await f.evaluate((sel) => document.querySelector(sel).firstElementChild.animate([{ paddingTop: "0px" }, { paddingTop: "12px" }], { duration: 800, iterations: Infinity }), SECOND);
+  await frames(f, 30);
+  const inner = await perFrame();
+  assert.ok(inner > 0.8 && inner < 1.2, `${inner.toFixed(2)} frames asked for per frame with an animation inside the selection`);
   await page.close();
 });
 

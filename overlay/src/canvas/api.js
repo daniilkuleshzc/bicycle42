@@ -73,7 +73,7 @@ function letGo() {
 export {
   HTML as html,
   mountCanvas as mount, setOn, resumeCanvas as resume, letGo, syncUi, drawBar, cvFrame as frame,
-  cvMove as pointerMove, cvUp as pointerUp, cvKey as key, zoneOf, closePop, select,
+  cvMove as pointerMove, cvUp as pointerUp, cancelDrag as pointerCancel, cvKey as key, zoneOf, closePop, select,
   draft, restoreEdits as restore, unsendCanvas as refuse, finish, dropFinished, showEdits, treeChanged, readPathsIfDue,
 };
 export const on = () => C.on;

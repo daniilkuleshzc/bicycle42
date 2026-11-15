@@ -194,7 +194,9 @@ let idleTimer = 0;
 let lastInput = 0;
 let raf = 0; // the frame asked for, 0 when none is
 export function active() {
-  if (!(S.enabled || S.pins.length)) return;
+  // Pins do not follow the pointer (their tooltip is the browser's hover): with review off,
+  // input asks for nothing; scroll and the page's changes go through moved().
+  if (!S.enabled) return;
   lastInput = performance.now();
   kick();
 }
@@ -205,13 +207,14 @@ export function moved() {
   else if (S.pins.length) kick();
 }
 /** A CSS animation or transition (or one the page's script started) is running on one of the
- *  elements or on an ancestor of one: its outline has to follow it every frame. One list for
+ *  elements, on an ancestor of one or inside one (a panel opening in a selected card resizes
+ *  the card): its outline has to follow it every frame. One list for
  *  the whole document, read only when nothing else keeps the frames going. */
 export function animating(els) {
   if (!els.some((el) => el && el.isConnected)) return false;
   for (const a of document.getAnimations()) {
     const t = a.playState === "running" && a.effect && /** @type {KeyframeEffect} */ (a.effect).target;
-    if (t && els.some((el) => el && t.contains(el))) return true;
+    if (t && els.some((el) => el && (t.contains(el) || el.contains(t)))) return true;
   }
   return false;
 }
