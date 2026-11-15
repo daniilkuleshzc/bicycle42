@@ -37,7 +37,10 @@ export function createOutbox(dir: string, log: (level: "warn", msg: string, data
       return queue.run(id, async () => {
         try {
           await fs.promises.mkdir(folder, { recursive: true })
-          await fs.promises.writeFile(file(id), text)
+          // Whole or not at all: a quit or a crash mid-write leaves the file it replaces.
+          const tmp = `${file(id)}.tmp`
+          await fs.promises.writeFile(tmp, text)
+          await fs.promises.rename(tmp, file(id))
           return true
         } catch (err) {
           log("warn", "can't save what a note sends", String(err))

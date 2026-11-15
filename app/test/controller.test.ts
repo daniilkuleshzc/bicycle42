@@ -707,6 +707,40 @@ test("a note goes on what the stream says: no question to the server while it sa
   }
 })
 
+test("a prompt of the app's own holds a note like a typed one; a summary that finds nothing to do does not keep it waiting", async () => {
+  const h = await boot()
+  try {
+    const s = await h.ready()
+    h.note("a")
+    await until(() => h.w.prompts.length === 1)
+    turn(h, s)
+    await until(() => h.notes() === "1:done")
+    await sleep(50)
+
+    // Commit changes starts a run before the stream says so: the note made right after waits.
+    const before = h.w.prompts.length
+    await h.cmd("commitChanges", "Tidy the hero")
+    h.note("b")
+    await until(() => h.notes() === "1:done 2:queued")
+    await sleep(100)
+    assert.equal(h.w.prompts.length, before + 1, "only the commit prompt went; the note waits")
+    h.agent.starts(s)
+    h.agent.finishes(s)
+    await until(() => h.w.prompts.length === before + 2)
+    turn(h, s)
+    await until(() => h.notes() === "1:done 2:done")
+    await sleep(50)
+
+    // A summary that starts no run leaves the conversation free: the next note goes.
+    h.server.route("POST", `/api/session/${s}/compact`, { json: { data: { id: "msg_c", type: "compaction", payload: {}, delivery: "steer" } } })
+    await h.cmd("runCommand", "compact", "")
+    h.note("c")
+    await until(() => h.w.prompts.length === before + 3)
+  } finally {
+    await h.close()
+  }
+})
+
 test("relaunch with a note that was waiting in the app: it is sent, pictures and all, from what was kept on disk", async () => {
   const fake = await fakeOpenCode()
   fake.w.sessions.set("ses_live", { id: "ses_live", location: { directory: "/repo" }, title: "t", time: { created: 1, updated: 2, busy: 3, idle: 4 } })

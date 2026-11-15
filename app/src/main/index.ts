@@ -1261,8 +1261,9 @@ async function onNote(s: Site, pn: PageNote) {
   const text = notePrompt(pn, note.n, { images: shots, references: pasted.length, before: !!before })
   const payload = { text, files: [...files, ...pasted] }
   outbox.set(note.id, payload)
-  // On disk in the background: a note held behind another must outlive a restart. (deliver
-  // writes it again, with its message id, and waits for that before it sends.)
+  // On disk in the background: a note held behind another must outlive a restart, and a quit
+  // waits for the write. Not awaited here, or two notes made together could be queued out of
+  // order. (deliver writes it again, with its message id, and waits for that before it sends.)
   void outboxFiles.save(note.id, payload)
   s.review.sending(note.id)
   await enqueue(s, note.id, note.lane)
@@ -1332,7 +1333,7 @@ function forgetBusy(id?: string) {
   busyEpoch++
 }
 
-/** Sends something typed, which starts a run: the conversation counts as busy from now, so a
+/** Sends a prompt, typed or the app's own (take back, commit, start the site), which starts a run: the conversation counts as busy from now, so a
  *  note made before the stream says so waits for it. Not known again when it was refused. */
 async function startsRun<T>(id: string, send: () => Promise<T>): Promise<T> {
   busy.set(id, true)
@@ -1341,6 +1342,19 @@ async function startsRun<T>(id: string, send: () => Promise<T>): Promise<T> {
   } catch (err) {
     forgetBusy(id)
     throw err
+  }
+}
+
+/** Sends something that may start a run or may not (a summary that finds nothing to summarise):
+ *  busy while it is sent, so no note goes beside it, then unknown, so the next note asks the
+ *  server, and the notes waiting are looked at again. A prompt always starts one: startsRun. */
+async function mayStartRun<T>(id: string, send: () => Promise<T>): Promise<T> {
+  busy.set(id, true)
+  try {
+    return await send()
+  } finally {
+    forgetBusy(id)
+    for (const s of sites.values()) pumpSite(s)
   }
 }
 
@@ -1500,7 +1514,7 @@ const builtins: Record<string, Builtin> = {
   // touched: they follow their own messages, and what is queued still runs.
   async compact(b, current, _args, options) {
     const delivery = options?.delivery === "queue" || options?.delivery === "steer" ? options.delivery : undefined
-    await b.compact(current.id, delivery ? { delivery } : undefined)
+    await mayStartRun(current.id, () => b.compact(current.id, delivery ? { delivery } : undefined))
   },
   async new() {
     await commands.newSession()
@@ -1732,7 +1746,7 @@ const commands: { [K in CommandName]: (...args: Parameters<Commands[K]>) => Retu
       showFiles(s)
     } else {
       const diff = await b.diff(note.session, note.message).catch(() => [] as FileChange[])
-      await b.prompt(note.session, { text: takeBackPrompt(note.n, note.text, diff) })
+      await startsRun(note.session, () => b.prompt(note.session, { text: takeBackPrompt(note.n, note.text, diff) }))
       reversing.add(note.session)
     }
     s.review.mark(note.id, { takenBack: how })
@@ -1793,7 +1807,8 @@ const commands: { [K in CommandName]: (...args: Parameters<Commands[K]>) => Retu
   async commitChanges(message) {
     const clean = typeof message === "string" ? message.trim() : ""
     if (!clean) throw new Error("Write what the commit is.")
-    await need().prompt(needSession().id, { text: commitPrompt(clean) })
+    const id = needSession().id
+    await startsRun(id, () => need().prompt(id, { text: commitPrompt(clean) }))
   },
   showNote(id) {
     const at = site?.review.note(id)?.anchor.at
@@ -1938,7 +1953,7 @@ const commands: { [K in CommandName]: (...args: Parameters<Commands[K]>) => Retu
     starting = true
     push()
     try {
-      await b.prompt(current.id, { text: startPrompt(p?.error ? p.url : "") })
+      await startsRun(current.id, () => b.prompt(current.id, { text: startPrompt(p?.error ? p.url : "") }))
     } catch (err) {
       siteAsked = undefined
       starting = false
@@ -2236,10 +2251,20 @@ else {
     window?.focus()
   })
   app.on("window-all-closed", () => app.quit())
-  app.on("before-quit", () => {
+  // What a note sends, and its pictures, are written in the background: the quit waits for them
+  // (3 s at most), so a note made just before it is still sent after the restart.
+  let written = false
+  app.on("before-quit", (event?: Electron.Event) => {
     unlisten?.()
     settleChanges()
     store.flush()
+    // (The tests emit before-quit by itself, with no event, for the flush alone.)
+    if (written || !event) return
+    event.preventDefault()
+    void Promise.race([Promise.all([outboxFiles.idle(), noteShots.idle()]), sleep(3000)]).finally(() => {
+      written = true
+      app.quit()
+    })
   })
   void app.whenReady().then(async () => {
     protocol.handle(SCHEME, (request) => chatPictures.serve(request.url))
