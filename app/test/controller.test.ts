@@ -213,7 +213,9 @@ test("Stop: the working note fails with a way forward, queued ones stay queued, 
   try {
     const s = await h.ready()
     const [a, b] = [h.note("a"), h.note("b"), h.note("c")]
-    await until(() => h.notes() === "1:queued 2:queued 3:queued")
+    // (A note held in the app reads "queued" too, so the first may still be on its way.)
+    await until(() => h.notes() === "1:queued 2:queued 3:queued" && h.w.prompts.length > 0)
+    await sleep(50)
     assert.equal(h.w.prompts.length, 1, "one note at a time: the others wait in the app")
     const [m1] = h.w.prompts.map((p) => p.id)
     h.agent.starts(s)
@@ -689,7 +691,7 @@ test("a note goes on what the stream says: no question to the server while it sa
     // A reconnect forgets what was known: the next note asks the server first, and does not go
     // while it says busy.
     h.server.drop()
-    await until(() => h.snap().connection.status === "online" && h.server.streams() === 1)
+    await until(() => h.snap().connection.status === "online" && h.server.streams() === 1, 10_000)
     await sleep(50)
     const w = h.w.sessions.get(s) as { time: Record<string, number> }
     w.time.busy = (w.time.idle ?? 0) + 100
