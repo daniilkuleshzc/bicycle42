@@ -1506,6 +1506,7 @@ test("one chain of frames: a drag that selects its element does not leave the la
   assert.ok(still < 0.3, `${still.toFixed(2)} frames asked for per frame while nothing moves`);
   // Animated, it is drawn every frame: once a frame, not twice.
   await f.evaluate((sel) => document.querySelector(sel).animate([{ translate: "0 0" }, { translate: "0 4px" }], { duration: 800, iterations: Infinity }), SECOND);
+  await frames(f, 30); // the slow tick sees it within 250 ms, and the frames start then
   const per = await perFrame();
   assert.ok(per > 0.8 && per < 1.2, `${per.toFixed(2)} frames asked for per frame (two chains: 2)`);
   await page.close();
