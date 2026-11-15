@@ -456,7 +456,8 @@ test("a note being made costs nothing while nothing moves: no stroke is written 
       return { d: w.d, records: w.records };
     });
   };
-  const ds = () => root(f, (r) => [...r.querySelectorAll(".strokes path")].map((p) => p.getAttribute("d").length));
+  // (the drawn strokes, then the one being drawn)
+  const ds = () => root(f, (r) => [...r.querySelectorAll(".strokes path, .live path")].map((p) => p.getAttribute("d").length));
   // A selection with its card open, and no pins.
   await clickAt(page, f, "#cta");
   await frames(f, 40); // past the half second in which the pointer still counts as moving
