@@ -55,6 +55,7 @@ src/main/outbox.ts      what each unfinished note sends (prompt, pictures), on d
 src/main/images.ts      screenshot → area crop + viewport thumbnail, each frame scaled once, yielding between steps
 src/main/queue.ts       one file operation at a time per key (outbox, shots)
 src/main/opencode.ts    the backend: fetch + one SSE stream → BackendEvents (no Electron)
+src/main/pictures.ts    the conversation's pictures by address (b42-img:), served to the window by main
 src/main/local.ts       finds the OpenCode server running on this computer
 src/main/store.ts       settings and notes on disk, versioned, atomic writes off the main thread (flushed at quit)
 src/preload.ts          window.b42: the only door between the window and main
@@ -88,6 +89,14 @@ src/renderer/           the window: top bar, notes list, chat (Solid, @kkrll/des
   Stored in `settings.json` under the app's user-data folder; notes are in `reviews/`.
 - **The chat is rebuilt from the server's step, text and tool events**, and the same code path
   re-reads it after a reconnect, so a dropped connection can't duplicate or reorder messages.
+  After a gap in one conversation's events (a step whose start was not seen), only its newest
+  messages are read, back to one read before that had settled by then; a reconnect, an undo, a
+  redo or a summary reads the whole list.
+- **A conversation's pictures are not in the chat.** Each is a `b42-img://pic/<conversation>/<message>/<file>`
+  address (`pictures.ts`), served by main through `protocol.handle` in the app window's session
+  only: from the note's own picture on disk, else from the bytes the message list brought (decoded
+  on the first look, kept in a bounded cache), else from the server again (`GET …/message/{id}`).
+  An address main did not hand out is refused. A re-read of 150 notes is 0.1 MB, not 45.
 - **A note remembers the conversation it was sent to**, and carries a message id chosen here.
   Switching conversations, a restart or a dropped connection can't mark it done by mistake, and
   retrying after a lost reply can't queue it twice. Its row says which conversation

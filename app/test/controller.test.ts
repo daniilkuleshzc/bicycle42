@@ -19,7 +19,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 const gone: FakeReply = { status: 404, json: { _tag: "SessionNotFoundError", message: "Session not found" } }
 
 type Stubs = {
-  electron: { handlers: Record<string, (e: unknown, ...a: unknown[]) => unknown>; sent: [string, unknown][]; dialogs: unknown[] }
+  electron: { handlers: Record<string, (e: unknown, ...a: unknown[]) => unknown>; sent: [string, unknown][]; dialogs: unknown[]; protocols: Record<string, (request: { url: string }) => Promise<Response> | Response> }
   page: { message(msg: unknown): void; sent: { type: string; [k: string]: unknown }[]; capture?: () => unknown; evaluate?: (js: string) => unknown; page?: { load(url: string): void } }
 }
 
@@ -1934,6 +1934,41 @@ test("the newest note is taken back exactly and a checkpoint is returned to: the
     assert.equal(await h.cmd("returnToCheckpoint", cp), 1)
     assert.deepEqual(requestsTo(h, "/revert/stage").at(-1)!.body, { messageID: h.w.prompts[1]!.id })
     assert.equal(reloads(), shown + 2)
+  } finally {
+    await h.close()
+  }
+})
+
+test("the conversation's pictures reach the window as b42-img addresses, served by main, and nothing else is", async () => {
+  const h = await boot()
+  try {
+    const s = await h.ready()
+    h.page.capture = () => shot("the area")
+    h.note("make it blue")
+    await until(() => h.w.prompts.length === 1)
+    const sent = lastPrompt(h)!.body as Sent & { id: string }
+    // What the server keeps: the note with its pictures, and a message typed with one pasted.
+    const files = (f: { name: string; uri: string }[]) => f.map((x) => ({ mime: "image/jpeg", name: x.name, data: x.uri.split(",")[1] }))
+    const messages = [
+      { id: sent.id, type: "user", time: { created: 1 }, text: sent.text, files: files(sent.files!) },
+      { id: "msg_typed", type: "user", time: { created: 2 }, text: "and this", files: [{ mime: "image/png", name: "p.png", data: Buffer.from("pasted").toString("base64") }] },
+    ]
+    h.server.route("GET", `/api/session/${s}/message`, { json: { data: messages, cursor: {} } })
+    h.electron.sent.length = 0
+    await h.electron.handlers["b42:chat"]!(null)
+    await until(() => h.chat().some((e) => e.type === "reset"))
+    const reset = h.chat().find((e) => e.type === "reset") as Extract<ChatEvent, { type: "reset" }>
+    assert.equal(JSON.stringify(reset).includes(";base64,"), false, "no picture travels in the reset")
+    const images = reset.items.flatMap((i) => (i.kind === "user" ? i.images : []))
+    assert.deepEqual(images.map((i) => i.src), [`b42-img://pic/${s}/${sent.id}/0`, `b42-img://pic/${s}/${sent.id}/1`, `b42-img://pic/${s}/msg_typed/0`])
+    const serve = (url: string) => Promise.resolve(h.electron.protocols["b42-img"]!({ url }))
+    const got = await serve(images[0]!.src)
+    assert.equal(got.status, 200)
+    assert.equal(got.headers.get("content-type"), "image/jpeg")
+    assert.equal(Buffer.from(await got.arrayBuffer()).toString(), "the area")
+    assert.equal(Buffer.from(await (await serve(images[2]!.src)).arrayBuffer()).toString(), "pasted")
+    assert.equal((await serve(`b42-img://pic/${s}/msg_unknown/0`)).status, 404)
+    assert.equal((await serve(`b42-img://pic/${s}/msg_typed/1`)).status, 404)
   } finally {
     await h.close()
   }

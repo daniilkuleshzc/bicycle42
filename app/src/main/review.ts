@@ -91,6 +91,8 @@ export type Review = {
    *  retried. */
   clearDone(): void
   note(id: string): Note | undefined
+  /** The note a conversation's message is, if any. */
+  byMessage(session: string, message: string): Note | undefined
   rows(): NoteRow[]
   /** What the reviewer, or the app, says of a note beside its status: which pictures it has,
    *  that it was taken back. `undefined` clears. True when it changed. */
@@ -634,6 +636,7 @@ export function createReview(saved?: unknown): Review {
     },
 
     note: find,
+    byMessage: (session, message) => notes.find((n) => n.message === message && n.session === session),
 
     mark(id, change) {
       const note = find(id)

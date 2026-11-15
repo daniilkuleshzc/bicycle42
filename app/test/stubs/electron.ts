@@ -7,6 +7,8 @@ export const stub = {
   /** [channel, value] for everything main sent to the window. */
   sent: [] as [string, unknown][],
   dialogs: [] as unknown[],
+  /** `protocol.handle` handlers, by scheme. */
+  protocols: {} as Record<string, (request: { url: string }) => Promise<Response> | Response>,
 }
 ;(globalThis as Record<string, unknown>).__electronStub = stub
 
@@ -45,3 +47,7 @@ export const nativeTheme = { shouldUseDarkColors: false }
 export const safeStorage = { isEncryptionAvailable: () => false }
 export const shell = { openExternal() {} }
 export const dialog = { showMessageBox: async (_window: unknown, options: unknown) => void stub.dialogs.push(options) }
+export const protocol = {
+  registerSchemesAsPrivileged() {},
+  handle: (scheme: string, fn: (request: { url: string }) => Promise<Response> | Response) => void (stub.protocols[scheme] = fn),
+}

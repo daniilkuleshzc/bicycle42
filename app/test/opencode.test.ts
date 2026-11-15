@@ -1094,7 +1094,7 @@ test("listen: a step cut off by a drop is not finished from half its parts", () 
       server.emit(ev("session.text.delta", { assistantMessageID: "msg_a1", ordinal: 0, delta: "tail" }))
       server.emit(ev("session.step.ended", { assistantMessageID: "msg_a1" }))
       await until(() => events.length > before)
-      assert.deepEqual(events.slice(before), [{ type: "resync", session: S }])
+      assert.deepEqual(events.slice(before), [{ type: "resync", session: S, gap: true }])
       stop()
     }),
   ))
@@ -1806,4 +1806,118 @@ test("transcript: it carries the context's count", () =>
       json: { data: [{ id: "msg_1", type: "assistant", time: { created: 1, completed: 2 }, model: { id: "opus", providerID: "anthropic" }, content: [], tokens: usage(2, 100, 120000, 898) }], cursor: {} },
     })
     assert.deepEqual((await backend.transcript("ses_1")).context, { used: 121000, providerID: "anthropic" })
+  }))
+
+// ── pictures by address, and reading only what is new after a gap ───────────────────────────────
+
+/** A message list the way the server pages it: `order` for the first page, then a cursor that
+ *  carries the order and where it left off. */
+function messageRoute(server: FakeServer, session: string, messages: () => unknown[]) {
+  server.route("GET", `/api/session/${session}/message`, (req) => {
+    if (req.query.has("cursor") && req.query.has("order")) return { status: 400, json: { _tag: "InvalidCursorError", message: "Cursor cannot be combined with order" } }
+    const limit = Number(req.query.get("limit") ?? 50)
+    const [order, from] = req.query.has("cursor") ? (req.query.get("cursor")!.split(":") as [string, string]) : [req.query.get("order") ?? "desc", "0"]
+    const all = order === "desc" ? [...messages()].reverse() : messages()
+    const page = all.slice(Number(from), Number(from) + limit)
+    return { json: { data: page, cursor: { previous: "p", next: `${order}:${Number(from) + limit}` } } }
+  })
+}
+
+const jpeg = (text: string) => Buffer.from(text).toString("base64")
+const userWithPicture = (i: number) => ({
+  id: `msg_${String(i).padStart(4, "0")}`,
+  type: "user",
+  time: { created: i },
+  text: `m${i}`,
+  files: [
+    { mime: "image/jpeg", name: `note-${i}-area.jpg`, data: jpeg(`area ${i}`) },
+    { mime: "text/plain", name: "notes.txt", data: jpeg("not a picture") },
+    { mime: "image/jpeg", name: `note-${i}-viewport.jpg`, data: jpeg(`viewport ${i}`) },
+  ],
+})
+
+test("transcript with pictures named: the items carry addresses, not the bytes, and the bytes stay reachable", () =>
+  withServer(async (server) => {
+    const named: Array<[string, string, number, string, string | undefined]> = []
+    const backend = createOpenCode({
+      url: server.url,
+      password: server.password,
+      pictures: (src, mime, data) => (named.push([src.session, src.message, src.file, mime, data]), `b42-img://pic/${src.session}/${src.message}/${src.file}`),
+    })
+    const messages = [userWithPicture(1), userWithPicture(2)]
+    server.route("GET", "/api/session/ses_1", { json: { data: rawSession } })
+    server.route("GET", "/api/session/ses_1/inbox", { json: { data: [{ id: "msg_queued", type: "user", time: { created: 9 }, payload: { text: "later", files: [{ mime: "image/png", name: "p.png", data: jpeg("queued") }] } }] } })
+    server.route("GET", /\/(permission|form)$/, { json: { data: [] } })
+    messageRoute(server, "ses_1", () => messages)
+    const t = await backend.transcript("ses_1")
+    const images = t.items.flatMap((i) => (i.kind === "user" ? i.images : []))
+    assert.deepEqual(images, [
+      { name: "note-1-area.jpg", src: "b42-img://pic/ses_1/msg_0001/0" },
+      { name: "note-1-viewport.jpg", src: "b42-img://pic/ses_1/msg_0001/2" },
+      { name: "note-2-area.jpg", src: "b42-img://pic/ses_1/msg_0002/0" },
+      { name: "note-2-viewport.jpg", src: "b42-img://pic/ses_1/msg_0002/2" },
+      { name: "p.png", src: "b42-img://pic/ses_1/msg_queued/0" },
+    ])
+    assert.equal(JSON.stringify(t.items).includes("base64"), false)
+    assert.deepEqual(named[0], ["ses_1", "msg_0001", 0, "image/jpeg", jpeg("area 1")], "the bytes are handed over with the name")
+
+    // One picture again, from the server: a delivered message, then one still in the queue.
+    server.route("GET", "/api/session/ses_1/message/msg_0002", { json: { data: messages[1] } })
+    server.route("GET", "/api/session/ses_1/message/msg_queued", { status: 404, json: { _tag: "MessageNotFoundError", message: "no" } })
+    assert.deepEqual(await backend.picture({ session: "ses_1", message: "msg_0002", file: 2 }), { mime: "image/jpeg", data: jpeg("viewport 2") })
+    assert.deepEqual(await backend.picture({ session: "ses_1", message: "msg_queued", file: 0 }), { mime: "image/png", data: jpeg("queued") })
+    assert.equal(await backend.picture({ session: "ses_1", message: "msg_0002", file: 7 }), undefined)
+
+    // Live: a queued note's pictures are named too.
+    const out: BackendEvent[] = []
+    const map = createEventMapper((e) => out.push(e), () => {}, (src) => `b42-img://pic/${src.session}/${src.message}/${src.file}`)
+    map({ id: "evt_1", type: "session.inbox.enqueued", data: { sessionID: "ses_1", inboxID: "msg_new", item: { type: "user", payload: { text: "x", files: [{ mime: "image/jpeg", name: "a.jpg", data: jpeg("a") }] } } } })
+    const item = out.flatMap((e) => (e.type === "chat" && e.event.type === "item" ? [e.event.item] : []))[0]
+    assert.deepEqual(item?.kind === "user" && item.images, [{ name: "a.jpg", src: "b42-img://pic/ses_1/msg_new/0" }])
+  }))
+
+test("transcript after a gap reads only the newest messages, up to one it had read settled; anything else reads the whole list", () =>
+  withServer(async (server) => {
+    const backend = createOpenCode({ url: server.url, password: server.password, pictures: (src) => `b42-img://pic/${src.session}/${src.message}/${src.file}` })
+    const messages: Array<Record<string, unknown>> = Array.from({ length: 300 }, (_, i) => userWithPicture(i))
+    // The newest step was still being written at the first read.
+    messages.push({ id: "msg_0300", type: "assistant", time: { created: 300 }, content: [{ type: "text", text: "half" }] })
+    let session: Record<string, unknown> = rawSession
+    server.route("GET", "/api/session/ses_1", () => ({ json: { data: session } }))
+    server.route("GET", /\/(inbox|permission|form)$/, { json: { data: [] } })
+    messageRoute(server, "ses_1", () => messages)
+    const reads = () => server.requests.filter((r) => r.path === "/api/session/ses_1/message").map((r) => r.query.toString())
+
+    const first = await backend.transcript("ses_1")
+    assert.equal(first.items.length, 301)
+    assert.deepEqual(reads(), ["order=asc&limit=200", "cursor=asc%3A200&limit=200"])
+
+    // The step finished, and two more messages came while the events were missed.
+    messages[300] = { id: "msg_0300", type: "assistant", time: { created: 300, completed: 301 }, content: [{ type: "text", text: "whole" }] }
+    messages.push(userWithPicture(301), { id: "msg_0302", type: "assistant", time: { created: 302, completed: 303 }, content: [{ type: "text", text: "done" }] })
+    server.requests.length = 0
+    const gap = await backend.transcript("ses_1", { gap: true })
+    assert.deepEqual(reads(), ["order=desc&limit=20"], "one short page from the newest")
+    // The same as reading it all.
+    const whole = await createOpenCode({ url: server.url, password: server.password, pictures: (src) => `b42-img://pic/${src.session}/${src.message}/${src.file}` }).transcript("ses_1")
+    assert.deepEqual(gap.items, whole.items)
+    assert.equal(gap.items.length, 303)
+    assert.deepEqual((gap.items[300] as ChatAssistant).parts, [{ kind: "text", key: "text:0", text: "whole" }], "the unfinished step was read again")
+
+    // Something was undone meanwhile: the whole list again, even after a gap.
+    session = { ...rawSession, revert: { messageID: "msg_0301" } }
+    server.requests.length = 0
+    await backend.transcript("ses_1", { gap: true })
+    assert.deepEqual(reads(), ["order=asc&limit=200", "cursor=asc%3A200&limit=200"])
+
+    // Not a gap (a reconnect, a summary): the whole list.
+    server.requests.length = 0
+    await backend.transcript("ses_1")
+    assert.equal(reads()[0], "order=asc&limit=200")
+
+    // A conversation never read: the whole list.
+    server.requests.length = 0
+    const fresh = createOpenCode({ url: server.url, password: server.password, pictures: (src) => `b42-img://pic/${src.session}/${src.message}/${src.file}` })
+    await fresh.transcript("ses_1", { gap: true })
+    assert.equal(reads()[0], "order=asc&limit=200")
   }))

@@ -14,7 +14,7 @@
 // One site (a page origin) maps to one folder on the server, picked once, and to one open
 // conversation there, plus a second "background" one for alt+Enter notes. A note remembers the
 // conversation it was sent to, so switching conversations never moves an older note's status.
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, safeStorage, shell, type NativeImage } from "electron"
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, protocol, safeStorage, shell, type NativeImage } from "electron"
 import fs from "node:fs"
 import path from "node:path"
 import { notePrompt, noteWords, TEMPLATES } from "../../../overlay/prompt.js"
@@ -58,6 +58,7 @@ import { createPage, type Page, type PageMessage } from "./page"
 import { createReview, imageUri, pageNote, type PageNote, type Review } from "./review"
 import { createOutbox, type Outgoing } from "./outbox"
 import { createShots } from "./shots"
+import { createPictures, SCHEME } from "./pictures"
 import { createStore, type SavedServer } from "./store"
 
 type Level = "info" | "warn" | "error"
@@ -75,6 +76,22 @@ const store = createStore(app.getPath("userData"), { log })
 const noteShots = createShots(app.getPath("userData"), log)
 /** What each unfinished note sends, on disk: a note waiting its turn, or one to retry, outlives a restart. */
 const outboxFiles = createOutbox(app.getPath("userData"), log)
+
+/** The conversation's pictures, served to the window by address (pictures.ts). A note's own
+ *  first picture is on disk already; anything else comes from what the server sent, or from the
+ *  server again. The scheme is the app window's: the page's session does not know it. */
+const chatPictures = createPictures({
+  fetch: async (src) => backend?.picture(src),
+  async local(src) {
+    if (src.file !== 0) return undefined
+    for (const s of sites.values()) {
+      const note = s.review.byMessage(src.session, src.message)
+      if (note?.pictures) return noteShots.bytes(note.id, "before")
+    }
+    return undefined
+  },
+})
+protocol.registerSchemesAsPrivileged([{ scheme: SCHEME, privileges: { standard: true, secure: true, supportFetchAPI: true } }])
 
 // ── secrets ─────────────────────────────────────────────────────────────────────────────────────
 // The server password is stored through the OS keychain when there is one. Without (a Linux box
@@ -125,9 +142,9 @@ const permissions = new Map<string, PermissionAsk>()
 const questions = new Map<string, Question>()
 
 /** The conversation the window shows. While its transcript loads, live events wait in `held`;
- *  `again` asks for one more read after this one (something was missed meanwhile), and
- *  `counted` is the context's count that arrived meanwhile. */
-let chat: { session: string; held: ChatEvent[] | null; again: boolean; counted?: { context?: ContextUse } } | undefined
+ *  `again` asks for one more read after this one (something was missed meanwhile; `whole`: more
+ *  than new messages), and `counted` is the context's count that arrived meanwhile. */
+let chat: { session: string; held: ChatEvent[] | null; again: boolean; whole?: boolean; counted?: { context?: ContextUse } } | undefined
 
 /** What the context of the conversation on screen held at the agent's last finished step.
  *  Undefined when nothing has measured it. */
@@ -397,13 +414,14 @@ function enter(id: string) {
   missingFolder = undefined
   modelChoice = undefined
   toChat({ type: "reset", session: "", items: [] })
+  chatPictures.clear()
   page?.load(store.settings().lastUrl ?? "")
 }
 
 /** Checks the server, then keeps listening to it. Rejects, leaving things as they were, when the
  *  address or password is wrong. */
 async function connect(url: string, password: string, opts: { save?: "remote" | "local" }) {
-  const next = createOpenCode({ url, password, log })
+  const next = createOpenCode({ url, password, log, pictures: chatPictures.name })
   const info = await next.info()
   drop()
   backend = next
@@ -703,15 +721,16 @@ async function refreshSessions() {
   }
 }
 
-async function openChat(id: string) {
+/** Reads the conversation and puts it on screen. `gap`: only new messages were missed. */
+async function openChat(id: string, gap = false) {
   const b = backend
   if (!b) return
   // A read of this conversation is already under way: one more after it is enough, however
   // many times that is asked. (A transcript with screenshots is megabytes.)
-  if (chat?.session === id && chat.held) return void (chat.again = true)
+  if (chat?.session === id && chat.held) return void ((chat.again = true), gap || (chat.whole = true))
   const mine: NonNullable<typeof chat> = (chat = { session: id, held: [], again: false })
   try {
-    const t = await b.transcript(id)
+    const t = await b.transcript(id, { gap })
     if (chat !== mine) return
     for (const [k, p] of permissions) if (p.session === id) permissions.delete(k)
     for (const [k, q] of questions) if (q.session === id) questions.delete(k)
@@ -739,7 +758,7 @@ async function openChat(id: string) {
     mine.held = null
     push()
   }
-  if (chat === mine && mine.again) void openChat(id)
+  if (chat === mine && mine.again) void openChat(id, !mine.whole)
 }
 
 /** After a restart or a dropped connection, notes may show "queued" or "working" for work that
@@ -798,7 +817,7 @@ function onBackend(e: BackendEvent) {
     case "resync":
       forgetBusy(e.session)
       // One conversation has a gap: only the one on screen is worth re-reading.
-      if (e.session) return void (chat?.session === e.session && openChat(e.session))
+      if (e.session) return void (chat?.session === e.session && openChat(e.session, e.gap))
       if (session) void openChat(session.id)
       void refreshSessions()
       for (const s of sites.values()) void settle(s)
@@ -2216,6 +2235,7 @@ else {
     store.flush()
   })
   void app.whenReady().then(async () => {
+    protocol.handle(SCHEME, (request) => chatPictures.serve(request.url))
     menu()
     // From source on macOS the dock would show Electron's own icon.
     if (appIcon && process.platform === "darwin") app.dock?.setIcon(appIcon)

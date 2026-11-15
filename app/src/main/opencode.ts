@@ -13,6 +13,7 @@
 // Server payloads are untrusted: every field is read through rec/str/num/list, and anything
 // unknown is skipped and logged once.
 import { posix } from "node:path"
+import type { PictureSource, Wire } from "./pictures"
 import type {
   ContextUse,
   AgentInfo,
@@ -49,7 +50,13 @@ import type {
 export type OpenCode = Backend & {
   /** Agents a message can hand work to with `@name`: not primary-only, not hidden. */
   mentionAgents(): Promise<MentionOption[]>
+  /** One picture of a message (or of an item still in the queue), as the server has it. */
+  picture(src: PictureSource): Promise<Wire | undefined>
 }
+
+/** Names a message's picture for the window (src/main/pictures.ts). Without one, a picture goes
+ *  to the window as a data URL. */
+export type NamePicture = (src: PictureSource, mime: string, data?: string) => string
 
 type Log = (level: "info" | "warn" | "error", msg: string, data?: unknown) => void
 type Warn = (msg: string, data?: unknown) => void
@@ -166,16 +173,21 @@ export function parseNote(text: string): { n: number; text: string } | undefined
   return { n: Number(head[1]), text: lines.slice(1, end).join("\n").slice("Note: ".length) }
 }
 
-/** `payload` is a user message or an inbox item's payload: both are `{ text, files? }`. */
-function userItem(id: string, time: number, payload: Raw, pending: boolean): ChatUser {
+/** A file whose data this client dropped after naming it (see `transcript`): still a picture. */
+const DROPPED = "\u0000dropped"
+
+/** `payload` is a user message or an inbox item's payload: both are `{ text, files? }`. With
+ *  `named`, a picture is shown by the address it gives (`file` is its place in the files). */
+function userItem(id: string, time: number, payload: Raw, pending: boolean, named?: (file: number, mime: string, data?: string) => string): ChatUser {
   const text = str(payload.text) ?? ""
   const images: ChatImage[] = []
-  for (const raw of list(payload.files)) {
+  for (const [i, raw] of list(payload.files).entries()) {
     const file = rec(raw)
     const mime = str(file.mime)
     const data = str(file.data)
-    if (mime?.startsWith("image/") && data)
-      images.push({ name: str(file.name) ?? "image", src: `data:${mime};base64,${data}` })
+    if (!mime?.startsWith("image/") || !data) continue
+    const src = named ? named(i, mime, data === DROPPED ? undefined : data) : `data:${mime};base64,${data}`
+    images.push({ name: str(file.name) ?? "image", src })
   }
   return defined({ kind: "user", id, time, text, images, note: parseNote(text), pending: pending || undefined })
 }
@@ -338,7 +350,15 @@ function agentMarker(id: string, time: number, agent: unknown): ChatMarker {
 /** A conversation from a re-read: the message list (oldest first), then what still waits in the
  *  inbox. `dir` is the session's folder. `undone` is the first message of a part that was undone
  *  and not yet given up for good: the list still has it, the conversation does not. */
-export function chatItems(messages: unknown[], inbox: unknown[], dir: string | undefined, warn: Warn = () => {}, undone?: string): ChatItem[] {
+export function chatItems(
+  messages: unknown[],
+  inbox: unknown[],
+  dir: string | undefined,
+  warn: Warn = () => {},
+  undone?: string,
+  pictures?: { session: string; name: NamePicture },
+): ChatItem[] {
+  const named = (message: string) => pictures && ((file: number, mime: string, data?: string) => pictures.name({ session: pictures.session, message, file }, mime, data))
   const items: ChatItem[] = []
   const delivered = new Set<string>()
   /** The user's messages from `undone` on, once it is reached. */
@@ -361,7 +381,7 @@ export function chatItems(messages: unknown[], inbox: unknown[], dir: string | u
     let item: ChatItem | undefined
     switch (m.type) {
       case "user":
-        item = userItem(id, time, m, false)
+        item = userItem(id, time, m, false, named(id))
         break
       case "assistant":
         item = assistantItem(id, time, m, dir)
@@ -399,7 +419,7 @@ export function chatItems(messages: unknown[], inbox: unknown[], dir: string | u
     const id = str(i.id)
     // The inbox also holds reminders the server queues for the model (type "synthetic").
     if (i.type !== "user" || !id || delivered.has(id)) continue
-    items.push(userItem(id, num(rec(i.time).created) ?? 0, rec(i.payload), true))
+    items.push(userItem(id, num(rec(i.time).created) ?? 0, rec(i.payload), true, named(id)))
   }
   return items
 }
@@ -526,7 +546,7 @@ const messageID = (eventID: unknown) => "msg_" + (str(eventID) ?? "").replace(/^
  *
  *  It keeps the steps that are still running, so a step's end can be sent as one whole item.
  *  Deltas pass straight through: a `delta` ChatEvent holds the appended text and nothing else. */
-export function createEventMapper(emit: (event: BackendEvent) => void, warn: Warn = () => {}): (raw: unknown) => void {
+export function createEventMapper(emit: (event: BackendEvent) => void, warn: Warn = () => {}, pictures?: NamePicture): (raw: unknown) => void {
   const steps = new Map<string, Step>()
   /** Inbox ids of the server's own (non-user) items, which never reach the chat. */
   const notOurs = new Set<string>()
@@ -563,7 +583,8 @@ export function createEventMapper(emit: (event: BackendEvent) => void, warn: War
         if (!id) return
         if (item.type !== "user") return void notOurs.add(id)
         emit({ type: "inbox", session, id, status: "queued" })
-        return chat({ type: "item", session, item: userItem(id, time, rec(item.payload), true) })
+        const named = pictures && ((file: number, mime: string, data?: string) => pictures({ session, message: id, file }, mime, data))
+        return chat({ type: "item", session, item: userItem(id, time, rec(item.payload), true, named) })
       }
       case "session.inbox.delivered": {
         const id = str(d.inboxID)
@@ -654,7 +675,7 @@ export function createEventMapper(emit: (event: BackendEvent) => void, warn: War
         // is known would replace a fuller item on screen; have that conversation re-read
         // instead. Once is enough: the re-read covers everything up to the next step.
         if (!step) {
-          if (!gaps.has(session)) emit({ type: "resync", session })
+          if (!gaps.has(session)) emit({ type: "resync", session, gap: true })
           return void gaps.add(session)
         }
         const error = type === "session.step.failed" ? str(rec(d.error).message) : undefined
@@ -755,6 +776,17 @@ function newMessageId(): string {
 }
 
 const PAGE = 200
+/** Messages per page when only the newest are wanted (after a gap). */
+const GAP_PAGE = 20
+/** Conversations whose last read is kept for the next gap. */
+const READ_KEPT = 8
+
+/** A message that will not change any more: anything but a step or a summary still under way. */
+function isSettled(m: Raw): boolean {
+  if (m.type === "assistant") return num(rec(m.time).completed) !== undefined || m.error !== undefined
+  if (m.type === "compaction") return m.status !== "running"
+  return true
+}
 /** At most this many files and folders per search: what one `@` list shows. */
 const FIND_LIMIT = 20
 const DETAIL_MAX_CHARS = 160
@@ -848,7 +880,7 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
   })
 }
 
-export function createOpenCode(opts: { url: string; password: string; fetch?: typeof fetch; log?: Log }): OpenCode {
+export function createOpenCode(opts: { url: string; password: string; fetch?: typeof fetch; log?: Log; pictures?: NamePicture }): OpenCode {
   const log: Log = opts.log ?? (() => {})
   const warned = new Set<string>()
   /** Once per message: a server that sends one odd thing sends it a thousand times. */
@@ -976,6 +1008,55 @@ export function createOpenCode(opts: { url: string; password: string; fetch?: ty
       throw err
     }
   }
+
+  /** Every message of a conversation, oldest first. */
+  async function all(id: string): Promise<unknown[]> {
+    const messages: unknown[] = []
+    let query = `order=asc&limit=${PAGE}`
+    for (;;) {
+      const page = rec(await api("GET", `${sessionPath(id)}/message?${query}`))
+      const batch = list(page.data)
+      messages.push(...batch)
+      // `cursor.next` is set even on the last page, so a short page is the cheaper end test.
+      // A cursor carries the order with it; sending `order` again is an error.
+      const next = str(rec(page.cursor).next)
+      if (batch.length < PAGE || !next) break
+      query = `cursor=${encodeURIComponent(next)}&limit=${PAGE}`
+    }
+    return messages
+  }
+
+  /** The conversation as read before, with what came after it: the newest messages are read
+   *  until one that was read before and had settled by then (no step or summary still being
+   *  written at or before it). That one is read again too, so everything from it on is fresh.
+   *  Undefined when the list ends first. */
+  async function since(id: string, before: unknown[]): Promise<unknown[] | undefined> {
+    const at = new Map<string, number>()
+    let settled = -1
+    for (const [i, m] of before.entries()) {
+      if (settled === i - 1 && isSettled(rec(m))) settled = i
+      const known = str(rec(m).id)
+      if (known) at.set(known, i)
+    }
+    const fresh: unknown[] = []
+    let query = `order=desc&limit=${GAP_PAGE}`
+    for (;;) {
+      const page = rec(await api("GET", `${sessionPath(id)}/message?${query}`))
+      const batch = list(page.data)
+      for (const m of batch) {
+        fresh.push(m)
+        const i = at.get(str(rec(m).id) ?? "")
+        if (i !== undefined && i <= settled) return [...before.slice(0, i), ...fresh.reverse()]
+      }
+      const next = str(rec(page.cursor).next)
+      if (batch.length < GAP_PAGE || !next) return undefined
+      query = `cursor=${encodeURIComponent(next)}&limit=${GAP_PAGE}`
+    }
+  }
+
+  /** What each conversation's last full or partial read found, to read only what is new after
+   *  a gap. Kept only with `pictures`, whose bytes it drops. */
+  const lastRead = new Map<string, { messages: unknown[]; undone: string | undefined }>()
 
   return {
     info: () => info(),
@@ -1275,7 +1356,7 @@ export function createOpenCode(opts: { url: string; password: string; fetch?: ty
       await api("DELETE", `/api/shell/${encodeURIComponent(id)}?${atLocation(directory)}`)
     },
 
-    async transcript(id) {
+    async transcript(id, { gap = false } = {}) {
       // The queue is read before the messages. A message delivered in between then shows up in
       // both (and is dropped from the queue's half); read the other way round it would be in
       // neither.
@@ -1285,25 +1366,47 @@ export function createOpenCode(opts: { url: string; password: string; fetch?: ty
         data("GET", `${sessionPath(id)}/permission`),
         data("GET", `${sessionPath(id)}/form`),
       ])
-      const messages: unknown[] = []
-      let query = `order=asc&limit=${PAGE}`
-      for (;;) {
-        const page = rec(await api("GET", `${sessionPath(id)}/message?${query}`))
-        const batch = list(page.data)
-        messages.push(...batch)
-        // `cursor.next` is set even on the last page, so a short page is the cheaper end test.
-        // A cursor carries the order with it; sending `order` again is an error.
-        const next = str(rec(page.cursor).next)
-        if (batch.length < PAGE || !next) break
-        query = `cursor=${encodeURIComponent(next)}&limit=${PAGE}`
-      }
       const undone = str(rec(rec(info).revert).messageID)
+      const before = lastRead.get(id)
+      lastRead.delete(id)
+      // After a gap only new messages are missing, unless something was undone meanwhile.
+      const messages = (gap && before && before.undone === undone && (await since(id, before.messages))) || (await all(id))
+      const dir = str(rec(rec(info).location).directory)
+      const items = chatItems(messages, list(inbox), dir, warn, undone, opts.pictures && { session: id, name: opts.pictures })
+      if (opts.pictures) {
+        // Kept for the next gap, without the pictures' bytes: those are named by now.
+        for (const m of messages)
+          for (const f of list(rec(m).files)) {
+            const file = rec(f)
+            if (str(file.data) && str(file.mime)?.startsWith("image/")) file.data = DROPPED
+          }
+        lastRead.set(id, { messages, undone })
+        for (const k of lastRead.keys()) if (lastRead.size > READ_KEPT) lastRead.delete(k)
+      }
       return {
         ...defined({ context: contextOf(messages, undone) }),
-        items: chatItems(messages, list(inbox), str(rec(rec(info).location).directory), warn, undone),
+        items,
         permissions: list(permissions).flatMap((raw) => permissionAsk(raw) ?? []),
         questions: list(forms).flatMap((raw) => question(raw, warn) ?? []),
       }
+    },
+
+    async picture({ session: id, message, file }) {
+      let payload: Raw | undefined
+      try {
+        payload = rec(await data("GET", `${sessionPath(id)}/message/${encodeURIComponent(message)}`))
+      } catch (err) {
+        if (rec(err).status !== 404) throw err
+        // Not delivered yet: it is in the queue, under the same id.
+        const item = list(await data("GET", `${sessionPath(id)}/inbox`))
+          .map(rec)
+          .find((i) => str(i.id) === message)
+        payload = item && rec(item.payload)
+      }
+      const f = rec(list(payload?.files)[file])
+      const mime = str(f.mime)
+      const bytes = str(f.data)
+      return mime && bytes && bytes !== DROPPED ? { mime, data: bytes } : undefined
     },
 
     async replyPermission(id, request, decision) {
@@ -1395,7 +1498,7 @@ export function createOpenCode(opts: { url: string; password: string; fetch?: ty
             // The stream has no replay: whatever happened while it was down is gone.
             if (connectedBefore) emit({ type: "resync" })
             connectedBefore = true
-            const map = createEventMapper(emit, warn)
+            const map = createEventMapper(emit, warn, opts.pictures)
             await readEvents(
               res.body,
               alive,
