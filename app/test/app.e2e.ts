@@ -163,6 +163,8 @@ async function main() {
   const wc = page.view.webContents
   const js = (code: string) => wc.executeJavaScript(code)
   const dbg = wc.debugger
+  check("the page runs without a debugger attached", !dbg.isAttached())
+  dbg.attach("1.3") // the test's own, for input
   const shadow = "document.querySelector('b42-review')?.shadowRoot"
   await until(() => js(`${shadow}?.querySelector('.pins')?.classList.contains('live') ?? false`))
   await dbg.sendCommand("Emulation.setFocusEmulationEnabled", { enabled: true })
@@ -217,12 +219,24 @@ async function main() {
   check("the note is queued", notes()[0]?.status === "queued" && notes()[0]?.n === 1, JSON.stringify(notes()[0]))
   check("the notes list shows it", (await until(async () => (await text()).includes("make this button bigger"))) === true)
 
-  emit("session.inbox.enqueued", { inboxID: "msg_1", item: { type: "user", payload: { text: sent?.text }, delivery: "queue" } })
+  // As the server has it: the note's text and its pictures, as base64 with their type.
+  const wireFiles = sent?.files.map((f) => ({ mime: "image/jpeg", name: f.name, data: f.uri.split(",")[1] }))
+  emit("session.inbox.enqueued", { inboxID: "msg_1", item: { type: "user", payload: { text: sent?.text, files: wireFiles }, delivery: "queue" } })
   busy = true
   emit("session.execution.started")
   emit("session.inbox.delivered", { inboxID: "msg_1" })
   await until(() => notes()[0]?.status === "working")
   check("delivered → working", notes()[0]?.status === "working" && state().session?.busy === true)
+  const thumbs = `[...document.querySelectorAll(".transcript .thumb img")]`
+  check(
+    "its pictures show in the conversation, by an address main serves, not as data",
+    (await until(() => ui(`${thumbs}.length === 2 && ${thumbs}.every((i) => i.src.startsWith("b42-img://pic/") && i.complete && i.naturalWidth > 100)`))) === true,
+    await ui(`${thumbs}.map((i) => i.src + " " + i.naturalWidth).join(", ")`),
+  )
+  check(
+    "…and an address main did not hand out shows nothing",
+    (await ui(`new Promise((done) => { const i = new Image(); i.onload = () => done("loaded"); i.onerror = () => done("refused"); i.src = "b42-img://pic/ses_x/msg_x/0" })`)) === "refused",
+  )
   check("the pin on the page follows", /pin working/.test(await until(async () => ((await pins()).includes("working") ? pins() : ""))), await pins())
 
   // A second note while the first is in progress, sent before the agent replies.

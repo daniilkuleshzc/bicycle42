@@ -90,6 +90,26 @@ test("click, type, Enter sends one note; page never sees the click or keys", asy
   await page.close();
 });
 
+test("the accent follows the page's theme when a class flips it, with no element added", async () => {
+  const { page, f } = await open();
+  const accent = () => f.evaluate(() => document.querySelector("b42-review").style.getPropertyValue("--pa"));
+  await f.waitForFunction(() => document.querySelector("b42-review").style.getPropertyValue("--pa"));
+  const light = await accent();
+  // The rule first (an element added, which looks at the accent again), then only the class.
+  await f.evaluate(() => {
+    const s = document.createElement("style");
+    s.textContent = ".b42-test-dark { background: #111 !important; }";
+    document.head.append(s);
+  });
+  await page.waitForTimeout(400);
+  assert.equal(await accent(), light, "no class yet: still the light page's accent");
+  await f.evaluate(() => document.body.classList.add("b42-test-dark"));
+  // On the slow tick, within a few frames at most.
+  await f.waitForFunction((was) => document.querySelector("b42-review").style.getPropertyValue("--pa") !== was, light, { timeout: 2000 });
+  assert.equal(await accent(), "#fffaa0");
+  await page.close();
+});
+
 test("pin follows the queue to done", async () => {
   const { page, f } = await open(100);
   await clickAt(page, f, "#cta");
@@ -456,7 +476,8 @@ test("a note being made costs nothing while nothing moves: no stroke is written 
       return { d: w.d, records: w.records };
     });
   };
-  const ds = () => root(f, (r) => [...r.querySelectorAll(".strokes path")].map((p) => p.getAttribute("d").length));
+  // (the drawn strokes, then the one being drawn)
+  const ds = () => root(f, (r) => [...r.querySelectorAll(".strokes path, .live path")].map((p) => p.getAttribute("d").length));
   // A selection with its card open, and no pins.
   await clickAt(page, f, "#cta");
   await frames(f, 40); // past the half second in which the pointer still counts as moving

@@ -38,9 +38,15 @@ export function shield(cursor) {
   if (cursor) shieldEl.style.cursor = cursor;
 }
 
-// A drag previews through one rule of its own, changed in place each frame; on release the
-// value is written into the element's styles and the rule goes.
-export function liveSet(sel, prop, val) {
+// A drag previews through one rule of its own: written when the drag starts, as
+// `width: var(--b42-live-width) !important` on the dragged element's selector, and not changed
+// again. Each frame sets only that custom property, inline on the element: a rule changed in an
+// adopted sheet restyles the whole document (on a page of a thousand cards, a millisecond and a
+// half a frame), an inline property only the element and what is in it. On release the value is
+// written into the element's styles (endDrag), the rule goes and the element's style attribute
+// is put back as it was.
+const VAR = "--b42-live-";
+export function liveSet(el, sel, prop, val) {
   if (!C.live) {
     C.live = new CSSStyleSheet();
     C.live.replaceSync("b42-none {}");
@@ -48,12 +54,30 @@ export function liveSet(sel, prop, val) {
   const rule = C.live.cssRules[0];
   if (rule.selectorText !== sel) rule.selectorText = sel;
   adopt(C.live, true);
-  if (val == null) rule.style.removeProperty(prop);
-  else rule.style.setProperty(prop, val, "important");
+  if (!rule.style.getPropertyValue(prop)) rule.style.setProperty(prop, `var(${VAR}${prop})`, "important");
+  if (C.liveEl && C.liveEl.el !== el) liveDrop();
+  if (!C.liveEl) C.liveEl = { el, was: el.getAttribute("style"), ours: null };
+  el.style.setProperty(VAR + prop, val);
+  C.liveEl.ours = el.getAttribute("style");
 }
 export function liveEnd() {
   if (!C.live) return;
   adopt(C.live, false);
   C.live.cssRules[0].style.cssText = "";
+  liveDrop();
+}
+/** The element's style attribute as it was before the drag: exactly, unless the page wrote it
+ *  meanwhile (then only the drag's own properties are taken out). */
+function liveDrop() {
+  const l = C.liveEl;
+  if (!l) return;
+  C.liveEl = null;
+  if (l.el.getAttribute("style") === l.ours) {
+    if (l.was === null) l.el.removeAttribute("style");
+    else l.el.setAttribute("style", l.was);
+    return;
+  }
+  const st = l.el.style;
+  for (let i = st.length - 1; i >= 0; i--) if (st[i].startsWith(VAR)) st.removeProperty(st[i]);
 }
 

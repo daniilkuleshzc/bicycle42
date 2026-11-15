@@ -3,7 +3,7 @@ import { icon, ICONS } from "./ui.js";
 import { rectOf } from "./page.js";
 import * as Notes from "./notes/api.js";
 import { active, pool } from "./render.js";
-import { domVersion, hostEl, variantsEl, variantStyle } from "./mount.js";
+import { hostEl, treeVersion, variantsEl, variantStyle } from "./mount.js";
 
 // ── variants ────────────────────────────────────────────────────────────────────────────────
 // The /variants template asks the agent to render every option as siblings in one wrapper:
@@ -13,7 +13,7 @@ import { domVersion, hostEl, variantsEl, variantStyle } from "./mount.js";
 // The page has no switching code. This layer hides all but the chosen one with a style rule
 // (no attribute is written, so a framework re-render can't undo it), draws a small switcher
 // over each group, and "Keep" starts a /keep note that tells the agent to delete the rest.
-const V = { groups: [], choice: {}, version: -1, css: "" };
+const V = { groups: [], choice: {}, version: -1, theme: "", css: "" };
 try {
   V.choice = JSON.parse(sessionStorage.getItem("b42-variants") || "{}") || {};
 } catch {}
@@ -29,14 +29,27 @@ function pageAccent() {
   return "#3b4d22";
 }
 
+/** What a page's dark mode is usually switched by: the root's and the body's class and style.
+ *  Strings read, nothing computed, so it can be looked at every frame. */
+function themeKey() {
+  const h = document.documentElement;
+  const b = document.body;
+  return `${h.className}|${h.getAttribute("style")}|${h.getAttribute("data-theme")}|${b ? `${b.className}|${b.getAttribute("style")}` : ""}`;
+}
+
 function scanVariants() {
-  if (V.version === domVersion) return;
-  V.version = domVersion;
-  const accent = pageAccent();
-  if (accent !== V.accent) {
-    hostEl.style.setProperty("--pa", (V.accent = accent));
-    hostEl.style.setProperty("--pat", accent === "#fffaa0" ? "#171717" : "#ffffff"); // words on the accent
+  // The accent again when the theme may have flipped, or elements came or went.
+  const theme = themeKey();
+  if (theme !== V.theme || V.version !== treeVersion) {
+    V.theme = theme;
+    const accent = pageAccent();
+    if (accent !== V.accent) {
+      hostEl.style.setProperty("--pa", (V.accent = accent));
+      hostEl.style.setProperty("--pat", accent === "#fffaa0" ? "#171717" : "#ffffff"); // words on the accent
+    }
   }
+  if (V.version === treeVersion) return; // only when elements came or went: a text that changes is no new group
+  V.version = treeVersion;
   V.groups = [...document.querySelectorAll("[data-b42-variants]")].slice(0, 12).map((el) => {
     const id = el.getAttribute("data-b42-variants") || "";
     const options = [...el.children]

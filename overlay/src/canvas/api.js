@@ -16,7 +16,7 @@ import { cvFrame } from "./frame.js";
 import { bar, cnote, HTML, mountCanvas } from "./mount.js";
 import { setMode } from "../mode.js";
 import { pagePress } from "../input.js";
-import { kick } from "../render.js";
+import { animating, kick } from "../render.js";
 
 // ── on and off ──────────────────────────────────────────────────────────────────────────────
 /** Canvas mode's own part of switching it on or off. The switch is setMode (mode.js): it
@@ -73,7 +73,7 @@ function letGo() {
 export {
   HTML as html,
   mountCanvas as mount, setOn, resumeCanvas as resume, letGo, syncUi, drawBar, cvFrame as frame,
-  cvMove as pointerMove, cvUp as pointerUp, cvKey as key, zoneOf, closePop, select,
+  cvMove as pointerMove, cvUp as pointerUp, cancelDrag as pointerCancel, cvKey as key, zoneOf, closePop, select,
   draft, restoreEdits as restore, unsendCanvas as refuse, finish, dropFinished, showEdits, treeChanged, readPathsIfDue,
 };
 export const on = () => C.on;
@@ -84,7 +84,9 @@ export const pointerDown = (e, z) => pagePress(e) && cvDown(e, z); // after what
 export const inEdit = (e) => !!C.edit && inEditedText(e);
 export const hasEdits = () => C.snap !== EMPTY;
 export const hasSent = () => C.sent.length > 0;
-export const busyFrames = () => C.on && (C.sel || C.drag || C.edit);
+/** Frames every display frame: a drag, text being edited in place, or a selection that is being
+ *  animated. One that only sits there is drawn on the slow tick, and when something moves. */
+export const busyFrames = () => C.on && S.enabled && !!(C.drag || C.edit || (C.sel && animating([C.sel])));
 // (C.typeTimer: CSS or classes typed but not yet an undo step. Until that pause ends the batch
 // still looks empty and the host has no draft of it: a reload then would lose what was typed.)
 export const busy = () => !!(C.drag || C.edit || C.typeTimer || C.snap !== EMPTY || (C.on && C.sel));

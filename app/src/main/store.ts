@@ -3,11 +3,12 @@
 //   <dir>/settings.json                       one file, read once at start
 //   <dir>/reviews/<origin, as a file name>.json   one per site, read when the site is opened
 //
-// Writes are collected for a moment and then replace the file whole (write a temp file, rename),
-// so a crash leaves either the old file or the new one. A file we can't read is never written
-// over: it is moved aside as <name>.corrupt-<time> for a person to look at. A file written by a
-// newer bicycle 42 is not ours to touch at all: it stays as it is, and what would have gone into
-// it stays in memory for this run.
+// Writes are collected for a moment and then replace the file whole (write a temp file, fsync,
+// rename), so a crash leaves either the old file or the new one. They happen off the main thread,
+// one at a time per file, the newest state last; at quit, flush() writes what is left at once.
+// A file we can't read is never written over: it is moved aside as <name>.corrupt-<time> for a
+// person to look at. A file written by a newer bicycle 42 is not ours to touch at all: it stays
+// as it is, and what would have gone into it stays in memory for this run.
 import fs from "node:fs"
 import path from "node:path"
 import type { Checkpoint, ModelRef } from "../shared/types"
@@ -55,10 +56,15 @@ export type Store = {
   update(change: (s: Settings) => void): void
   /** The raw saved JSON, or undefined. */
   loadReview(origin: string): unknown
-  /** Debounced per origin: the last one given within the window is what gets written. */
+  /** Debounced per origin: the last one given within the window is what gets written. `data`
+   *  may be a function that returns it, called when the write is due, so a burst of changes
+   *  is serialised once. */
   saveReview(origin: string, data: unknown): void
-  /** Writes everything pending now, synchronously. For quit. */
+  /** Writes everything pending now, and whatever a write under way still has in hand,
+   *  synchronously. For quit. */
   flush(): void
+  /** Writes everything pending now, off the main thread, and resolves once all of it is on disk. */
+  idle(): Promise<void>
   /** A file read so far was written by a newer bicycle 42, so changes to it are not being saved.
    *  The log says which file; the user should hear that this run won't remember them. */
   readonly readOnly: boolean
@@ -80,7 +86,7 @@ export function createStore(dir: string, opts: { debounceMs?: number; log?: Log 
 
   /** Parsed contents when the file holds this version's JSON object; undefined when there is no
    *  such file, it was unusable (and is now moved aside), or it is from a newer version (and is
-   *  now in `newer`). */
+   *  now in `newer`). Indented or not, it reads the same. */
   function read(file: string, version: number): Record<string, unknown> | undefined {
     if (newer.has(file)) return
     let text: string
@@ -120,15 +126,20 @@ export function createStore(dir: string, opts: { debounceMs?: number; log?: Log 
     return
   }
 
-  function write(file: string, data: unknown): boolean {
+  /** The temp file of a write; its name is swapped in once it is complete. A write at quit has
+   *  its own, so it never meets one still under way. */
+  const tmpOf = (file: string, later: boolean) => `${file}.tmp-${process.pid}${later ? "-w" : ""}`
+
+  /** Writes `text` now, on this thread. For quit, and for nothing else. */
+  function writeNow(file: string, text: string): boolean {
     if (newer.has(file)) return false
-    const tmp = `${file}.tmp-${process.pid}`
+    const tmp = tmpOf(file, false)
     try {
       fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 })
       // 0600: settings hold the server password, reviews hold text from the reviewer's pages.
       const fd = fs.openSync(tmp, "w", 0o600)
       try {
-        fs.writeSync(fd, JSON.stringify(data, null, 2))
+        fs.writeSync(fd, text)
         // On disk before the rename, or a power cut could leave the new name on an empty file.
         fs.fsyncSync(fd)
       } finally {
@@ -145,43 +156,115 @@ export function createStore(dir: string, opts: { debounceMs?: number; log?: Log 
     }
   }
 
-  const saved = read(settingsFile, 1)
-  const settings = { ...saved, version: 1, sites: isObj(saved?.sites) ? saved.sites : {} } as Settings
-
-  let settingsDirty = false
-  /** Reviews waiting to be written, by origin. */
-  const pending = new Map<string, unknown>()
+  /** Files waiting to be written, by path: what makes their text, called when the write is due. */
+  const pending = new Map<string, () => string>()
   let timer: ReturnType<typeof setTimeout> | undefined
+
+  /** Per file: the number of the newest text handed to a write, that text until it is on disk
+   *  (what a read gets, and what a quit must still write), and the end of its chain of writes.
+   *  One write of a file at a time, in the order asked for, so the last state is the one left. */
+  const latest = new Map<string, number>()
+  const handed = new Map<string, { n: number; text: string }>()
+  const chains = new Map<string, Promise<void>>()
+  let count = 0
+
+  /** Writes `text` off the main thread, after the writes of this file before it. Opening,
+   *  writing and fsync are asynchronous; the rename is not, so nothing can come between the
+   *  check that this is still the newest text and the swap. */
+  function writeLater(file: string, text: string) {
+    const n = ++count
+    latest.set(file, n)
+    handed.set(file, { n, text })
+    const step = async () => {
+      // A newer text is queued behind this one, or was written at once by a flush.
+      if (newer.has(file) || latest.get(file) !== n) return
+      const tmp = tmpOf(file, true)
+      try {
+        await fs.promises.mkdir(path.dirname(file), { recursive: true, mode: 0o700 })
+        const handle = await fs.promises.open(tmp, "w", 0o600)
+        try {
+          await handle.writeFile(text)
+          // On disk before the rename, or a power cut could leave the new name on an empty file.
+          await handle.sync()
+        } finally {
+          await handle.close()
+        }
+        if (latest.get(file) !== n) return void (await fs.promises.rm(tmp, { force: true }).catch(() => undefined))
+        fs.renameSync(tmp, file)
+      } catch (err) {
+        log("error", "store: save failed, will try again with the next save", { file, error: String(err) })
+        await fs.promises.rm(tmp, { force: true }).catch(() => undefined)
+        // Tried again with the next save, unless something newer is already waiting.
+        if (latest.get(file) === n && !pending.has(file)) pending.set(file, () => text)
+      } finally {
+        if (handed.get(file)?.n === n) handed.delete(file)
+      }
+    }
+    const chain = (chains.get(file) ?? Promise.resolve()).then(step)
+    chains.set(file, chain)
+    void chain.then(() => chains.get(file) === chain && chains.delete(file))
+  }
+
+  /** The wait is over: everything pending goes to disk, off the main thread. */
+  function due() {
+    clearTimeout(timer)
+    timer = undefined
+    const now = [...pending]
+    pending.clear()
+    for (const [file, text] of now) writeLater(file, text())
+  }
 
   function flush() {
     clearTimeout(timer)
     timer = undefined
-    if (settingsDirty && write(settingsFile, settings)) settingsDirty = false
-    for (const [origin, data] of pending) if (write(reviewFile(origin), data)) pending.delete(origin)
+    // A write under way may not finish before the app is gone: what it holds is written here.
+    for (const [file, { text }] of handed) if (!pending.has(file)) pending.set(file, () => text)
+    handed.clear()
+    for (const [file, text] of pending) {
+      // Whatever a write under way has in hand is older than this, and is not swapped in after it.
+      latest.set(file, ++count)
+      if (writeNow(file, text())) pending.delete(file)
+    }
   }
 
   // The first change starts the clock and later ones ride along, so steady changes (a draft being
   // typed) still reach the disk every `debounceMs` instead of pushing the save back forever.
   function schedule() {
-    timer ??= setTimeout(flush, debounceMs)
+    timer ??= setTimeout(due, debounceMs)
   }
+
+  const saved = read(settingsFile, 1)
+  const settings = { ...saved, version: 1, sites: isObj(saved?.sites) ? saved.sites : {} } as Settings
 
   return {
     settings: () => settings,
     update(change) {
       change(settings)
-      settingsDirty = true
+      // Small, and opened by people now and then: indented.
+      pending.set(settingsFile, () => JSON.stringify(settings, null, 2))
       schedule()
     },
     loadReview(origin) {
-      if (pending.has(origin)) return pending.get(origin)
+      const file = reviewFile(origin)
+      const waiting = pending.get(file)
+      if (waiting) return JSON.parse(waiting())
+      // Handed to a write that has not finished: the file still has what was before.
+      const writing = handed.get(file)
+      if (writing) return JSON.parse(writing.text)
       return read(reviewFile(origin), REVIEW_VERSION)
     },
     saveReview(origin, data) {
-      pending.set(origin, data)
+      // One line: a review with its notes is large, and only this app reads it.
+      pending.set(reviewFile(origin), () => JSON.stringify(typeof data === "function" ? data() : data))
       schedule()
     },
     flush,
+    async idle() {
+      while (pending.size || chains.size) {
+        if (pending.size) due()
+        await Promise.all(chains.values())
+      }
+    },
     get readOnly() {
       return newer.size > 0
     },

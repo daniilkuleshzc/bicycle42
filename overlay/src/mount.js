@@ -6,8 +6,8 @@ import { finishCapture, refuseCapture } from "./sent.js";
 import * as Canvas from "./canvas/api.js";
 import * as Motion from "./motion/api.js";
 import { hostMode, retellMode } from "./mode.js";
-import { blockIfActive, isOurs, LEFT_FOR_US, leftForUs, onKeyDown, onPointerDown, onPointerMove, onPointerUp, OURS_ONLY, oursOnly, setEnabled, setPins } from "./input.js";
-import { active, kick } from "./render.js";
+import { blockIfActive, isOurs, LEFT_FOR_US, leftForUs, onKeyDown, onPointerDown, onPointerMove, onPointerUp, onPointerCancel, OURS_ONLY, oursOnly, setEnabled, setPins } from "./input.js";
+import { active, kick, moved } from "./render.js";
 import STYLES from "./styles.css"; // its text: the build loads a stylesheet as a string
 
 // ── mount ───────────────────────────────────────────────────────────────────────────────────
@@ -15,6 +15,7 @@ import STYLES from "./styles.css"; // its text: the build loads a stylesheet as 
 // are here and not with the rest of the state; every other file reads them.
 export let hostEl, root, boxes, pinsEl, cursorStyle, tip, variantsEl, variantStyle;
 export let domVersion = 0; // bumped on every DOM mutation; pins re-search only when it changes
+export let treeVersion = 0; // bumped when elements are added or removed (not for a text): variant groups are looked for again
 
 // The layer has to be the topmost thing on the page and has to take typing, whatever the page
 // shows. Two browser rules decide where it sits:
@@ -44,6 +45,9 @@ function raise() {
   } catch {}
   if (typing) Notes.textarea.focus({ preventScroll: true });
 }
+
+/** A mutation record that adds or removes an element (a text node coming or going is a text). */
+const addsOrRemoves = (r) => r.type === "childList" && [...r.addedNodes, ...r.removedNodes].some((n) => n.nodeType === 1);
 
 function mount() {
   if (hostEl && hostEl.isConnected) return;
@@ -83,7 +87,12 @@ function mount() {
     // (Before any batch is applied again: this observer was made first, so it is told first.)
     Canvas.treeChanged(records);
     domVersion++;
-    kick();
+    const tree = records.some(addsOrRemoves);
+    if (tree) treeVersion++;
+    // With review off and no pins there is nothing to follow; a variant group that came or went
+    // still needs its one frame, which hides all but the chosen option, review on or off.
+    if (S.enabled || S.pins.length) moved();
+    else if (tree) kick();
   }).observe(document.documentElement, { childList: true, subtree: true, characterData: true, attributeFilter: ["open"] });
   // Something of the page's entered the top layer after us: go back on top of it.
   window.addEventListener(
@@ -106,11 +115,12 @@ function mount() {
   window.addEventListener("pointerdown", onPointerDown, opts);
   window.addEventListener("pointermove", onPointerMove, opts);
   window.addEventListener("pointerup", onPointerUp, opts);
+  window.addEventListener("pointercancel", onPointerCancel, opts);
   for (const t of ["mousedown", "mouseup", "click", "dblclick", "auxclick", "dragstart", "selectstart", "touchstart"])
     window.addEventListener(t, blockIfActive, opts);
   window.addEventListener("keydown", onKeyDown, opts);
-  window.addEventListener("scroll", kick, { capture: true, passive: true });
-  window.addEventListener("resize", kick, { passive: true });
+  window.addEventListener("scroll", moved, { capture: true, passive: true });
+  window.addEventListener("resize", moved, { passive: true });
   for (const type of ["pointerdown", "pointermove", "pointerup", "keydown", "keyup", "wheel"])
     window.addEventListener(type, active, { capture: true, passive: true });
 

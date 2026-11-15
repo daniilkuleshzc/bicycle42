@@ -91,6 +91,8 @@ export type Review = {
    *  retried. */
   clearDone(): void
   note(id: string): Note | undefined
+  /** The note a conversation's message is, if any. */
+  byMessage(session: string, message: string): Note | undefined
   rows(): NoteRow[]
   /** What the reviewer, or the app, says of a note beside its status: which pictures it has,
    *  that it was taken back. `undefined` clears. True when it changed. */
@@ -102,8 +104,11 @@ export type Review = {
   /** A note is on its way to the agent or with it (sending, queued, working). Unlike sessions(),
    *  this counts notes still being sent, which have no session yet. */
   inFlight(): boolean
-  /** Strict JSON, versioned ({ version: 1, … }), for store.ts. */
+  /** Strict JSON, versioned ({ version: 1, … }), detached from the review. */
   toJSON(): unknown
+  /** The same, still sharing the review's own objects: to be turned into text at once and not
+   *  kept. What store.ts writes, which it serialises only when the write is due. */
+  stored(): unknown
 }
 
 // ── reading what the page and the disk hand us ──────────────────────────────────────────────────
@@ -631,6 +636,7 @@ export function createReview(saved?: unknown): Review {
     },
 
     note: find,
+    byMessage: (session, message) => notes.find((n) => n.message === message && n.session === session),
 
     mark(id, change) {
       const note = find(id)
@@ -682,10 +688,8 @@ export function createReview(saved?: unknown): Review {
     inFlight: () => notes.some((n) => n.status === "sending" || open(n)),
 
     // Through JSON, so what goes to disk is exactly what would come back: no undefined, no NaN.
-    toJSON: () =>
-      JSON.parse(
-        JSON.stringify({ version: REVIEW_VERSION, enabled: review.enabled, autoReload: review.autoReload, draft: review.draft ?? null, notes }),
-      ),
+    toJSON: () => JSON.parse(JSON.stringify(review.stored())),
+    stored: () => ({ version: REVIEW_VERSION, enabled: review.enabled, autoReload: review.autoReload, draft: review.draft ?? null, notes }),
   }
   return review
 }

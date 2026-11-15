@@ -317,12 +317,15 @@ test("resize: an edge drag writes width into element styles, snapped to 4px; mod
   await clickAt(page, f, SECOND, 100, 80);
   const b = await box(f, SECOND);
   const label = { text: "" };
+  const inline = () => f.evaluate((s) => document.querySelector(s).getAttribute("style"), SECOND);
+  const before = await inline();
   await drag(page, f, b.x + b.width, b.y + 30, b.x + b.width + 57, b.y + 30, {
     hold: async () => (label.text = await ui(f, (r) => r.querySelector(".lab.live").textContent)),
   });
   assert.equal(label.text, "width 200 → 256", "the live label follows the drag");
   assert.equal(await field(f, "css").inputValue(), "width: 256px;");
   assert.equal((await box(f, SECOND)).width, 256);
+  assert.equal(await inline(), before, "the drag's preview leaves the element's own style attribute as it was");
   // without snapping, and replacing the declaration in place
   await page.keyboard.down(MOD);
   await drag(page, f, b.x + 256, b.y + 30, b.x + 256 + 13, b.y + 30);
@@ -663,6 +666,19 @@ test("Esc cancels a drag; nothing is ever sent without Enter", async () => {
   await frames(f);
   assert.equal((await box(f, SECOND)).width, 200);
   assert.equal(await field(f, "css").inputValue(), "");
+  assert.equal(await f.evaluate((s) => document.querySelector(s).getAttribute("style"), SECOND), null, "no style attribute is left behind");
+  // The browser taking the pointer away (a system gesture) undoes it the same way.
+  await page.mouse.move(b.x + b.width, b.y + 30);
+  await page.mouse.down();
+  await page.mouse.move(b.x + b.width + 60, b.y + 30, { steps: 5 });
+  await frames(f);
+  assert.equal((await box(f, SECOND)).width, 260);
+  await f.evaluate(() => window.dispatchEvent(new PointerEvent("pointercancel", { pointerId: 1, bubbles: true })));
+  await page.mouse.up();
+  await frames(f);
+  assert.equal((await box(f, SECOND)).width, 200, "pointercancel puts the width back");
+  assert.equal(await field(f, "css").inputValue(), "");
+  assert.equal(await f.evaluate((s) => document.querySelector(s).getAttribute("style"), SECOND), null, "no style attribute or live property is left behind");
   // every other way of making edits, and the bar's buttons: no note
   await drag(page, f, b.x + b.width, b.y + 30, b.x + b.width + 40, b.y + 30);
   await f.locator("b42-review .undo").click();
@@ -1483,7 +1499,7 @@ test("one chain of frames: a drag that selects its element does not leave the la
   await drag(page, f, b.x + 100, b.y + 80, b.x - 150, b.y + 80);
   assert.equal(await ui(f, (r) => r.querySelector(".ipath").textContent), "Card · Pro For small teams");
   await frames(f, 40); // past the half second in which the pointer still counts as moving
-  const per = await f.evaluate(() => new Promise((done) => {
+  const perFrame = () => f.evaluate(() => new Promise((done) => {
     const real = window.requestAnimationFrame;
     let asked = 0, left = 30;
     window.requestAnimationFrame = (cb) => {
@@ -1497,7 +1513,22 @@ test("one chain of frames: a drag that selects its element does not leave the la
     };
     real.call(window, step);
   }));
+  // A selection that sits still is drawn on the slow tick only.
+  const still = await perFrame();
+  assert.ok(still < 0.3, `${still.toFixed(2)} frames asked for per frame while nothing moves`);
+  // Animated, it is drawn every frame: once a frame, not twice.
+  await f.evaluate((sel) => document.querySelector(sel).animate([{ translate: "0 0" }, { translate: "0 4px" }], { duration: 800, iterations: Infinity }), SECOND);
+  await frames(f, 30); // the slow tick sees it within 250 ms, and the frames start then
+  const per = await perFrame();
   assert.ok(per > 0.8 && per < 1.2, `${per.toFixed(2)} frames asked for per frame (two chains: 2)`);
+  // An animation inside the selection (a panel opening in it) moves its outline too: every frame.
+  await f.evaluate((sel) => document.querySelector(sel).getAnimations().forEach((a) => a.cancel()), SECOND);
+  await frames(f, 40);
+  assert.ok((await perFrame()) < 0.3, "still again once the animation is gone");
+  await f.evaluate((sel) => document.querySelector(sel).firstElementChild.animate([{ paddingTop: "0px" }, { paddingTop: "12px" }], { duration: 800, iterations: Infinity }), SECOND);
+  await frames(f, 30);
+  const inner = await perFrame();
+  assert.ok(inner > 0.8 && inner < 1.2, `${inner.toFixed(2)} frames asked for per frame with an animation inside the selection`);
   await page.close();
 });
 

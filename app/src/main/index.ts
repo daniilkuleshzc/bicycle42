@@ -14,7 +14,7 @@
 // One site (a page origin) maps to one folder on the server, picked once, and to one open
 // conversation there, plus a second "background" one for alt+Enter notes. A note remembers the
 // conversation it was sent to, so switching conversations never moves an older note's status.
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, safeStorage, shell, type NativeImage } from "electron"
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, protocol, safeStorage, shell, type NativeImage } from "electron"
 import fs from "node:fs"
 import path from "node:path"
 import { notePrompt, noteWords, TEMPLATES } from "../../../overlay/prompt.js"
@@ -50,7 +50,7 @@ import type {
   Shortcut,
   SlashCommand,
 } from "../shared/types"
-import { noteImages } from "./images"
+import { noteImages, notePicture } from "./images"
 import { readLocal } from "./local"
 import { isPlaceholder, placeholderTitle, titleFrom } from "./naming"
 import { createOpenCode, type OpenCode } from "./opencode"
@@ -58,6 +58,7 @@ import { createPage, type Page, type PageMessage } from "./page"
 import { createReview, imageUri, pageNote, type PageNote, type Review } from "./review"
 import { createOutbox, type Outgoing } from "./outbox"
 import { createShots } from "./shots"
+import { createPictures, SCHEME } from "./pictures"
 import { createStore, type SavedServer } from "./store"
 
 type Level = "info" | "warn" | "error"
@@ -75,6 +76,22 @@ const store = createStore(app.getPath("userData"), { log })
 const noteShots = createShots(app.getPath("userData"), log)
 /** What each unfinished note sends, on disk: a note waiting its turn, or one to retry, outlives a restart. */
 const outboxFiles = createOutbox(app.getPath("userData"), log)
+
+/** The conversation's pictures, served to the window by address (pictures.ts). A note's own
+ *  first picture is on disk already; anything else comes from what the server sent, or from the
+ *  server again. The scheme is the app window's: the page's session does not know it. */
+const chatPictures = createPictures({
+  fetch: async (src) => backend?.picture(src),
+  async local(src) {
+    if (src.file !== 0) return undefined
+    for (const s of sites.values()) {
+      const note = s.review.byMessage(src.session, src.message)
+      if (note?.pictures) return noteShots.bytes(note.id, "before")
+    }
+    return undefined
+  },
+})
+protocol.registerSchemesAsPrivileged([{ scheme: SCHEME, privileges: { standard: true, secure: true, supportFetchAPI: true } }])
 
 // ── secrets ─────────────────────────────────────────────────────────────────────────────────────
 // The server password is stored through the OS keychain when there is one. Without (a Linux box
@@ -125,9 +142,9 @@ const permissions = new Map<string, PermissionAsk>()
 const questions = new Map<string, Question>()
 
 /** The conversation the window shows. While its transcript loads, live events wait in `held`;
- *  `again` asks for one more read after this one (something was missed meanwhile), and
- *  `counted` is the context's count that arrived meanwhile. */
-let chat: { session: string; held: ChatEvent[] | null; again: boolean; counted?: { context?: ContextUse } } | undefined
+ *  `again` asks for one more read after this one (something was missed meanwhile; `whole`: more
+ *  than new messages), and `counted` is the context's count that arrived meanwhile. */
+let chat: { session: string; held: ChatEvent[] | null; again: boolean; whole?: boolean; counted?: { context?: ContextUse } } | undefined
 
 /** What the context of the conversation on screen held at the agent's last finished step.
  *  Undefined when nothing has measured it. */
@@ -230,19 +247,41 @@ function toChat(event: ChatEvent) {
   if (window && !window.isDestroyed()) window.webContents.send("b42:chat", event)
 }
 
-/** A review changed: save it, redraw its pins if it is the one on screen, refresh the window. */
+/** Sites whose review changed since the last `settleChanges`. */
+const dirty = new Set<Site>()
+let settling = false
+
+/** A review changed: save it, redraw its pins if it is the one on screen, refresh the window.
+ *  A note moves several times in one turn of the event loop (added, held, released, sent); the
+ *  work is done once per turn for all of them, like `push`. */
 function changed(s: Site) {
-  // A site of a server that was left meanwhile: its file belongs to that server, not this one.
-  if (sites.get(s.origin) !== s) return
+  dirty.add(s)
+  if (settling) return
+  settling = true
+  setImmediate(settleChanges)
+}
+
+/** Does what `changed` put off. Also called directly where the sites are about to change hands
+ *  (another server), so what was changed before goes to the file it belongs to. */
+function settleChanges() {
+  settling = false
+  if (!dirty.size) return
+  const now = [...dirty]
+  dirty.clear()
   for (const id of outbox.keys()) {
     const status = noteSite(id)?.review.note(id)?.status
     if (status === undefined || status === "done") {
       outbox.delete(id)
-      outboxFiles.drop(id)
+      void outboxFiles.drop(id)
     }
   }
-  store.saveReview(reviewKey(s.origin), s.review.toJSON())
-  if (s === site) page?.send({ type: "pins", pins: pinsOf(s.review) })
+  for (const s of now) {
+    // A site of a server that was left meanwhile: its file belongs to that server, not this one.
+    if (sites.get(s.origin) !== s) continue
+    // Serialised when it is written, not now: a burst of changes costs one write.
+    store.saveReview(reviewKey(s.origin), () => s.review.stored())
+    if (s === site) page?.send({ type: "pins", pins: pinsOf(s.review) })
+  }
   push()
 }
 
@@ -302,6 +341,7 @@ function serverUrl(input: string) {
 }
 
 function drop() {
+  forgetBusy()
   running = []
   clearTimeout(runningTimer)
   clearTimeout(retryTimer)
@@ -346,6 +386,8 @@ function remember(kind: "remote" | "local", url: string, password: string, compu
 function enter(id: string) {
   const s = store.settings()
   if (s.current === id) return
+  // What changed on this server's sites is saved under its own prefix, before that changes.
+  settleChanges()
   // The first server ever, or the one saved before servers were kept: what is here is its own.
   if (!s.current) return store.update((x) => void ((x.current = id), (x.prefix ??= "")))
   store.update((x) => {
@@ -372,13 +414,14 @@ function enter(id: string) {
   missingFolder = undefined
   modelChoice = undefined
   toChat({ type: "reset", session: "", items: [] })
+  chatPictures.clear()
   page?.load(store.settings().lastUrl ?? "")
 }
 
 /** Checks the server, then keeps listening to it. Rejects, leaving things as they were, when the
  *  address or password is wrong. */
 async function connect(url: string, password: string, opts: { save?: "remote" | "local" }) {
-  const next = createOpenCode({ url, password, log })
+  const next = createOpenCode({ url, password, log, pictures: chatPictures.name })
   const info = await next.info()
   drop()
   backend = next
@@ -678,15 +721,16 @@ async function refreshSessions() {
   }
 }
 
-async function openChat(id: string) {
+/** Reads the conversation and puts it on screen. `gap`: only new messages were missed. */
+async function openChat(id: string, gap = false) {
   const b = backend
   if (!b) return
   // A read of this conversation is already under way: one more after it is enough, however
   // many times that is asked. (A transcript with screenshots is megabytes.)
-  if (chat?.session === id && chat.held) return void (chat.again = true)
+  if (chat?.session === id && chat.held) return void ((chat.again = true), gap || (chat.whole = true))
   const mine: NonNullable<typeof chat> = (chat = { session: id, held: [], again: false })
   try {
-    const t = await b.transcript(id)
+    const t = await b.transcript(id, { gap })
     if (chat !== mine) return
     for (const [k, p] of permissions) if (p.session === id) permissions.delete(k)
     for (const [k, q] of questions) if (q.session === id) questions.delete(k)
@@ -714,7 +758,7 @@ async function openChat(id: string) {
     mine.held = null
     push()
   }
-  if (chat === mine && mine.again) void openChat(id)
+  if (chat === mine && mine.again) void openChat(id, !mine.whole)
 }
 
 /** After a restart or a dropped connection, notes may show "queued" or "working" for work that
@@ -763,22 +807,27 @@ function sessionGone(id: string) {
 function onBackend(e: BackendEvent) {
   switch (e.type) {
     case "connection":
-      // The first "online" came from connect(); later ones follow a dropped stream.
+      // The first "online" came from connect(); later ones follow a dropped stream, which may
+      // have missed runs starting and ending.
       connection = e.state
+      forgetBusy()
       // Pins follow the connection too: working ones read as paused while it is down.
       if (site) page?.send({ type: "pins", pins: pinsOf(site.review) })
       return push()
     case "resync":
+      forgetBusy(e.session)
       // One conversation has a gap: only the one on screen is worth re-reading.
-      if (e.session) return void (chat?.session === e.session && openChat(e.session))
+      if (e.session) return void (chat?.session === e.session && openChat(e.session, e.gap))
       if (session) void openChat(session.id)
       void refreshSessions()
       for (const s of sites.values()) void settle(s)
       return
     case "session-gone":
+      forgetBusy(e.session)
       return sessionGone(e.session)
     case "inbox":
     case "run": {
+      if (e.type === "run") busy.set(e.session, e.status === "started")
       if (e.type === "run" && session?.id === e.session) (session = { ...session, busy: e.status === "started" }), push()
       // A run that ends may have left something running, or stopped it.
       if (e.type === "run" && e.status !== "started") void refreshRunning()
@@ -807,7 +856,7 @@ function onBackend(e: BackendEvent) {
         if (was.has(id)) continue
         afterPictures = afterPictures.then(() => afterPicture(s, id))
         // (After a restart it is not in memory, so `changed` did not see it.)
-        outboxFiles.drop(id)
+        void outboxFiles.drop(id)
       }
       return
     }
@@ -988,6 +1037,8 @@ async function afterPicture(s: Site, id: string) {
   if (!p || !shot) return
   // A note taken back meanwhile has nothing to show: the area is as it was before it.
   const here = () => page === p && site === s && s.review.note(id)?.status === "done" && !s.review.note(id)?.takenBack && samePage(p.state().url, shot.url)
+  // It waits on the page's frames (two, with the layer hidden), in a hidden window too.
+  const frames = p.holdFrames()
   try {
     await sleep(AFTER_WAIT)
     for (let i = 0; i < AFTER_TRIES && here() && (p.state().loading || (await p.overlay("window.__b42 ? window.__b42.busy() : false"))); i++) await sleep(500)
@@ -1000,16 +1051,20 @@ async function afterPicture(s: Site, id: string) {
         ` const was = [scrollX, scrollY]; scrollTo({ left: ${Number(v.scrollX)}, top: ${Number(v.scrollY)}, behavior: "instant" });` +
         ` return new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(was)))) })()`,
     )
+    let frame: NativeImage
     try {
-      const n = s.review.note(id)?.n ?? 0
-      const file = noteImages(await p.capture(), { bounds: shot.bounds, viewport: v } as PageNote, n)[0]
-      if (file && noteShots.save(id, "after", file.uri) && s.review.mark(id, { pictures: "both" })) changed(s)
+      frame = await p.capture()
     } finally {
       const back = Array.isArray(was) ? `scrollTo({ left: ${Number(was[0])}, top: ${Number(was[1])}, behavior: "instant" });` : ""
       await p.evaluate(`(() => { document.getElementById("b42-after")?.remove(); ${back} })()`)
     }
+    // The page has its scroll back while the picture is cut: only the area is kept.
+    const file = await notePicture(frame, { bounds: shot.bounds, viewport: v }, s.review.note(id)?.n ?? 0)
+    if ((await noteShots.save(id, "after", file.uri)) && s.review.mark(id, { pictures: "both" })) changed(s)
   } catch (err) {
     log("warn", "no picture of the note's area after the agent was done", say(err))
+  } finally {
+    frames()
   }
 }
 
@@ -1136,7 +1191,7 @@ function onPage(msg: PageMessage) {
       return changed(s)
     case "draft":
       review.draft = msg.draft ?? null
-      store.saveReview(s.origin, review.toJSON())
+      store.saveReview(reviewKey(s.origin), () => review.stored())
       return
     case "pin":
       // A pin was clicked on the page: the window shows that note. Only an id we know goes on.
@@ -1183,6 +1238,8 @@ async function onNote(s: Site, pn: PageNote) {
   let files: PromptFile[] = []
   let before: NativeImage | undefined
   const pasted = pn.images ?? []
+  // The page draws while its pictures are taken, in a hidden window too (the overlay's answers come a frame or two later).
+  const frames = page?.holdFrames()
   try {
     // The overlay hid its note card and pins two frames ago; outlines and strokes stay drawn.
     const shot = page ? await page.capture() : undefined
@@ -1190,20 +1247,24 @@ async function onNote(s: Site, pn: PageNote) {
     if (shot && (pn.edits || pn.css)) before = await beforePicture(pn.id)
     // The pictures are taken: the overlay may take the next selection while the JPEGs are made.
     page?.send({ type: "captured", id: pn.id })
-    if (shot) files = noteImages(shot, pn, note.n, before)
+    if (shot) files = await noteImages(shot, pn, note.n, before)
     // The first picture is the area as it is now (for a canvas note, as it was before the
     // reviewer's edits): what the agent's result will be looked at beside.
-    if (files[0] && noteShots.save(note.id, "before", files[0].uri)) s.review.mark(note.id, { pictures: "before" })
+    if (files[0] && (await noteShots.save(note.id, "before", files[0].uri))) s.review.mark(note.id, { pictures: "before" })
   } catch (err) {
     before = undefined
     page?.send({ type: "captured", id: pn.id })
     log("warn", "screenshot failed; the note goes without one", say(err))
   }
-  const shots = (before ? files.length - 1 : files.length) as 0 | 1 | 2
+  frames?.()
+  const shots =(before ? files.length - 1 : files.length) as 0 | 1 | 2
   const text = notePrompt(pn, note.n, { images: shots, references: pasted.length, before: !!before })
   const payload = { text, files: [...files, ...pasted] }
   outbox.set(note.id, payload)
-  outboxFiles.save(note.id, payload)
+  // On disk in the background: a note held behind another must outlive a restart, and a quit
+  // waits for the write. Not awaited here, or two notes made together could be queued out of
+  // order. (deliver writes it again, with its message id, and waits for that before it sends.)
+  void outboxFiles.save(note.id, payload)
   s.review.sending(note.id)
   await enqueue(s, note.id, note.lane)
 }
@@ -1260,6 +1321,54 @@ async function enqueue(s: Site, id: string, lane: Lane) {
   await pump(s, lane)
 }
 
+/** Whether each conversation is running, as the event stream last said (its runs starting and
+ *  ending). Absent is not known: nothing said since the stream connected, reconnected or had a
+ *  gap there. `busyEpoch` counts the times it was all forgotten, so an answer to a question asked
+ *  before that is not taken for knowledge. */
+const busy = new Map<string, boolean>()
+let busyEpoch = 0
+function forgetBusy(id?: string) {
+  if (id) return void busy.delete(id)
+  busy.clear()
+  busyEpoch++
+}
+
+/** Sends a prompt, typed or the app's own (take back, commit, start the site), which starts a run: the conversation counts as busy from now, so a
+ *  note made before the stream says so waits for it. Not known again when it was refused. */
+async function startsRun<T>(id: string, send: () => Promise<T>): Promise<T> {
+  busy.set(id, true)
+  try {
+    return await send()
+  } catch (err) {
+    forgetBusy(id)
+    throw err
+  }
+}
+
+/** Sends something that may start a run or may not (a summary that finds nothing to summarise):
+ *  busy while it is sent, so no note goes beside it, then unknown, so the next note asks the
+ *  server, and the notes waiting are looked at again. A prompt always starts one: startsRun. */
+async function mayStartRun<T>(id: string, send: () => Promise<T>): Promise<T> {
+  busy.set(id, true)
+  try {
+    return await send()
+  } finally {
+    forgetBusy(id)
+    for (const s of sites.values()) pumpSite(s)
+  }
+}
+
+/** Whether a conversation is running: what the stream said, or the server when it said nothing. */
+async function isBusy(b: OpenCode, id: string): Promise<boolean> {
+  const known = busy.get(id)
+  if (known !== undefined) return known
+  const epoch = busyEpoch
+  const running = !!(await b.session(id))?.busy
+  // A run that started or ended while this was asked is newer than the answer.
+  if (epoch === busyEpoch && !busy.has(id)) busy.set(id, running)
+  return running
+}
+
 const pumping = new Set<string>()
 /** Sends the next waiting note of a lane, when the lane has none with the agent and its
  *  conversation is not busy with something else (a message typed in the chat). One note is one
@@ -1275,8 +1384,7 @@ async function pump(s: Site, lane: Lane) {
       // (So do the notes of a site whose server was left while this waited for an answer.)
       if (!next || !backend || connection.status !== "online" || sites.get(s.origin) !== s) return
       try {
-        const info = await backend.session(await laneSession(s, lane))
-        if (info?.busy) return
+        if (await isBusy(backend, await laneSession(s, lane))) return
       } catch (err) {
         if (connection.status !== "online") return
         s.review.failed(next.id, say(err))
@@ -1300,15 +1408,15 @@ function pumpSite(s: Site) {
 }
 
 async function deliver(s: Site, id: string, lane: Lane) {
-  const payload = outbox.get(id) ?? outboxFiles.read(id)
+  const payload = outbox.get(id) ?? (await outboxFiles.read(id))
   try {
     if (!payload) throw new Error("The app was restarted, so this note's screenshot is gone. Write the note again.")
     outbox.set(id, payload)
     const target = await laneSession(s, lane)
-    if (!payload.id) {
-      payload.id = backend!.messageId()
-      outboxFiles.save(id, payload)
-    }
+    payload.id ??= backend!.messageId()
+    // On disk with the id it goes by before it goes: after a restart it is retried under the
+    // same id, which the server does not queue twice.
+    await outboxFiles.save(id, payload)
     const sent = await backend!.prompt(target, { id: payload.id, text: payload.text, files: payload.files })
     s.review.sent(id, sent.id, target)
     void autoName(target, s.review.rows().find((r) => r.id === id)?.text ?? "")
@@ -1406,7 +1514,7 @@ const builtins: Record<string, Builtin> = {
   // touched: they follow their own messages, and what is queued still runs.
   async compact(b, current, _args, options) {
     const delivery = options?.delivery === "queue" || options?.delivery === "steer" ? options.delivery : undefined
-    await b.compact(current.id, delivery ? { delivery } : undefined)
+    await mayStartRun(current.id, () => b.compact(current.id, delivery ? { delivery } : undefined))
   },
   async new() {
     await commands.newSession()
@@ -1592,7 +1700,7 @@ const commands: { [K in CommandName]: (...args: Parameters<Commands[K]>) => Retu
     const before = site.review.rows().map((r) => r.id)
     site.review.clearDone()
     const left = new Set(site.review.rows().map((r) => r.id))
-    for (const id of before) if (!left.has(id)) (noteShots.drop(id), outboxFiles.drop(id))
+    for (const id of before) if (!left.has(id)) (void noteShots.drop(id), void outboxFiles.drop(id))
     changed(site)
   },
   async retryNote(id) {
@@ -1603,19 +1711,18 @@ const commands: { [K in CommandName]: (...args: Parameters<Commands[K]>) => Retu
     const accepted = !!s.review.note(id)?.message
     const note = s.review.retry(id)
     if (!note) return
-    const payload = outbox.get(id) ?? outboxFiles.read(id)
+    const payload = outbox.get(id) ?? (await outboxFiles.read(id))
     if (payload) {
       if (accepted) delete payload.id
       outbox.set(note.id, payload)
-      outboxFiles.save(note.id, payload)
+      void outboxFiles.save(note.id, payload)
     }
     await enqueue(s, note.id, note.lane)
   },
   removeNote(id) {
     if (!site) return
     site.review.remove(id)
-    noteShots.drop(id)
-    if (typeof id === "string") outboxFiles.drop(id)
+    if (typeof id === "string") (void noteShots.drop(id), void outboxFiles.drop(id))
     changed(site)
   },
   notePictures(id) {
@@ -1639,7 +1746,7 @@ const commands: { [K in CommandName]: (...args: Parameters<Commands[K]>) => Retu
       showFiles(s)
     } else {
       const diff = await b.diff(note.session, note.message).catch(() => [] as FileChange[])
-      await b.prompt(note.session, { text: takeBackPrompt(note.n, note.text, diff) })
+      await startsRun(note.session, () => b.prompt(note.session, { text: takeBackPrompt(note.n, note.text, diff) }))
       reversing.add(note.session)
     }
     s.review.mark(note.id, { takenBack: how })
@@ -1700,7 +1807,8 @@ const commands: { [K in CommandName]: (...args: Parameters<Commands[K]>) => Retu
   async commitChanges(message) {
     const clean = typeof message === "string" ? message.trim() : ""
     if (!clean) throw new Error("Write what the commit is.")
-    await need().prompt(needSession().id, { text: commitPrompt(clean) })
+    const id = needSession().id
+    await startsRun(id, () => need().prompt(id, { text: commitPrompt(clean) }))
   },
   showNote(id) {
     const at = site?.review.note(id)?.anchor.at
@@ -1845,7 +1953,7 @@ const commands: { [K in CommandName]: (...args: Parameters<Commands[K]>) => Retu
     starting = true
     push()
     try {
-      await b.prompt(current.id, { text: startPrompt(p?.error ? p.url : "") })
+      await startsRun(current.id, () => b.prompt(current.id, { text: startPrompt(p?.error ? p.url : "") }))
     } catch (err) {
       siteAsked = undefined
       starting = false
@@ -1859,7 +1967,7 @@ const commands: { [K in CommandName]: (...args: Parameters<Commands[K]>) => Retu
     const b = need()
     const current = needSession()
     const files = pictures(images)
-    await b.prompt(current.id, { text, ...(files.length ? { files } : {}), ...sendOptions(options, chatDirectory(current)) })
+    await startsRun(current.id, () => b.prompt(current.id, { text, ...(files.length ? { files } : {}), ...sendOptions(options, chatDirectory(current)) }))
     void autoName(current.id, text)
   },
   async commands() {
@@ -1880,12 +1988,14 @@ const commands: { [K in CommandName]: (...args: Parameters<Commands[K]>) => Retu
     const builtin = builtins[name.trim()]
     if (builtin) return builtin(b, current, typeof args === "string" ? args.trim() : "", options)
     const files = pictures(images)
-    await b.command(current.id, {
-      name: name.trim(),
-      text: typeof args === "string" ? args : "",
-      ...(files.length ? { files } : {}),
-      ...sendOptions(options, chatDirectory(current)),
-    })
+    await startsRun(current.id, () =>
+      b.command(current.id, {
+        name: name.trim(),
+        text: typeof args === "string" ? args : "",
+        ...(files.length ? { files } : {}),
+        ...sendOptions(options, chatDirectory(current)),
+      }),
+    )
   },
   async mentions(query) {
     const b = need()
@@ -2046,6 +2156,7 @@ function menu() {
           { role: "togglefullscreen" },
           { type: "separator" },
           { label: "Developer Tools: App", accelerator: "Alt+CmdOrCtrl+I", click: () => window?.webContents.openDevTools({ mode: "detach" }) },
+          // The overlay is the page's preload, not a debugger's: open or closed, the tools leave it be.
           { label: "Developer Tools: Page", accelerator: "Alt+CmdOrCtrl+J", click: () => page?.view.webContents.openDevTools({ mode: "detach" }) },
         ],
       },
@@ -2092,8 +2203,7 @@ async function createWindow() {
   })
 
   page = await createPage(win, {
-    overlay: fs.readFileSync(path.join(__dirname, "overlay.js"), "utf8"),
-    lookup: fs.readFileSync(path.join(__dirname, "overlay-lookup.js"), "utf8"),
+    preload: path.join(__dirname, "page-preload.cjs"),
     onMessage: onPage,
     onChange() {
       const url = page?.state().url ?? ""
@@ -2141,11 +2251,23 @@ else {
     window?.focus()
   })
   app.on("window-all-closed", () => app.quit())
-  app.on("before-quit", () => {
+  // What a note sends, and its pictures, are written in the background: the quit waits for them
+  // (3 s at most), so a note made just before it is still sent after the restart.
+  let written = false
+  app.on("before-quit", (event?: Electron.Event) => {
     unlisten?.()
+    settleChanges()
     store.flush()
+    // (The tests emit before-quit by itself, with no event, for the flush alone.)
+    if (written || !event) return
+    event.preventDefault()
+    void Promise.race([Promise.all([outboxFiles.idle(), noteShots.idle()]), sleep(3000)]).finally(() => {
+      written = true
+      app.quit()
+    })
   })
   void app.whenReady().then(async () => {
+    protocol.handle(SCHEME, (request) => chatPictures.serve(request.url))
     menu()
     // From source on macOS the dock would show Electron's own icon.
     if (appIcon && process.platform === "darwin") app.dock?.setIcon(appIcon)

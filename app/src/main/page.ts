@@ -1,11 +1,14 @@
 // The page under review: one WebContentsView inside the app window, with the overlay injected.
 //
-// The overlay (dist/overlay.js, built from ../../../overlay/src) goes in over CDP before the
-// page's own scripts run, and talks back through a CDP binding (window.__review), so it needs
-// nothing from the page and survives reloads. Both live in a script world of their own (WORLD):
-// the overlay shares the page's DOM, but the page's scripts can't see its globals or call the binding. This file knows nothing about notes: it hands the overlay's messages to the
-// controller and offers load / capture / send.
-import { WebContentsView, type BrowserWindow, type NativeImage } from "electron"
+// The overlay (built from ../../../overlay/src into dist/page-preload.cjs, see page-preload.ts) is
+// the view's preload: Electron runs it before the page's own scripts in every document of the top
+// frame, so it needs nothing from the page and survives reloads. It runs in the preload's script
+// world (WORLD), which is the page's DOM but not the page's scripts: they can't see the overlay's
+// globals or its way back to the app, window.__review, which sends over IPC. No debugger is
+// attached, so the page's console and the rest of its runtime events never reach this process.
+// This file knows nothing about notes: it hands the overlay's messages to the controller and
+// offers load / capture / send.
+import { WebContentsView, type BrowserWindow, type IpcMainEvent, type NativeImage } from "electron"
 import type { HostMessage, PageMessage } from "../../../overlay/protocol"
 import type { Rect } from "../shared/types"
 
@@ -32,17 +35,21 @@ export type Page = {
   reloadWhenIdle(): void
   /** Runs a script in the page, among the page's own scripts, and resolves its value; rejects never (resolves undefined on error). */
   evaluate(js: string): Promise<unknown>
-  /** The same in the overlay's world, where window.__b42 is. Undefined when the page has no overlay. */
+  /** The same in the overlay's world, where window.__b42 is. Undefined when the page has no overlay.
+   *  While the page is loading it waits for the load to end. */
   overlay(js: string): Promise<unknown>
+  /** The page draws at its full rate, hidden or not, until the function returned is called
+   *  (each once; holds may overlap). For a picture, and for what the overlay does on its way to
+   *  one: it hides its card two frames before a note is sent. Otherwise a page in a hidden or
+   *  minimised window is throttled like a background tab. */
+  holdFrames(): () => void
   focus(): void
   dispose(): void
 }
 
 type Options = {
-  /** overlay.js source. */
-  overlay: string
-  /** overlay-lookup.js source: the part that has to run among the page's own scripts. */
-  lookup?: string
+  /** The path of page-preload.cjs: the overlay, and the lookup that runs among the page's own scripts. */
+  preload: string
   /** Default "persist:review". */
   partition?: string
   /** overlay → host. */
@@ -68,8 +75,12 @@ const HMR_PROBE = `!!(window.$RefreshReg$ || window.$RefreshHelpers$ || window._
   document.querySelector('script[src*="/@vite/client"],script[src*="react-refresh"],script[src*="webpack-hot"],script[src*="livereload"],nextjs-portal'))`
 
 const BUSY = "!!(window.__b42 && window.__b42.busy && window.__b42.busy())"
-/** The script world the overlay and its binding live in, apart from the page's own. */
-const WORLD = "b42"
+/** The script world the overlay and window.__review live in, apart from the page's own: the one
+ *  Electron runs a preload in when contextIsolation is on. */
+const WORLD = 999
+/** overlay → main, and main → overlay (page-preload.ts has the same two). */
+const FROM_OVERLAY = "b42:overlay-says"
+const TO_OVERLAY = "b42:host-says"
 
 const EMPTY = `<!doctype html><meta charset=utf-8><style>
 html{height:100%;background:#f1eadf;color:#0a0a0a;font:14px/1.5 system-ui,sans-serif}
@@ -87,11 +98,14 @@ export async function createPage(window: BrowserWindow, opts: Options): Promise<
   const view = new WebContentsView({
     webPreferences: {
       partition: opts.partition ?? "persist:review",
+      // The overlay, in a world of its own; top frame only (no nodeIntegrationInSubFrames).
+      preload: opts.preload,
       nodeIntegration: false,
       contextIsolation: true,
       sandbox: true,
-      // Captures and the overlay must keep working while the app window is in the background.
-      backgroundThrottling: false,
+      // Throttled while the window is hidden or minimised, like a background tab; a picture and
+      // a note on its way lift that for as long as they need frames (holdFrames).
+      backgroundThrottling: true,
       // A page that loads (or reloads after a note) must not pull focus out of the chat box.
       focusOnNavigation: false,
     },
@@ -107,7 +121,6 @@ export async function createPage(window: BrowserWindow, opts: Options): Promise<
   /** Why the overlay is missing. Kept apart from `error`, which every new load clears. */
   let overlayError: string | undefined
   let hmr = false
-  let attached = false
   /** Closing the view is not instant; nothing may touch it once dispose() was called. */
   let disposed = false
   /** When the reviewer last pressed Enter in this view; 0 once that Enter has admitted its note. */
@@ -119,46 +132,29 @@ export async function createPage(window: BrowserWindow, opts: Options): Promise<
   let forgeryLogged = false
   let reloadTimer: ReturnType<typeof setTimeout> | undefined
   let probeTimer: ReturnType<typeof setTimeout> | undefined
-  /** The overlay's world in each frame that has one: frame id → execution context id. */
-  const worlds = new Map<string, number>()
-  let topFrame = ""
+  /** How many holds keep the page drawing (holdFrames), and the one an Enter or a click takes. */
+  let holds = 0
+  let inputHold: { release(): void; timer: ReturnType<typeof setTimeout> } | undefined
 
-  // ── overlay: in before page scripts, binding back to main. Both survive reloads. ──────────────
-  // Top frame of real pages only; iframes and the placeholder get no overlay.
-  const top = (source: string) => `if (window === window.top && !/^(data|about):$/.test(location.protocol)) {\n${source}\n}`
-  const inject = top(opts.overlay)
+  const gone = () => disposed || wc.isDestroyed()
 
-  wc.debugger.on("message", (_event, method, params) => {
-    // Where the overlay's world is, so `send` and `overlay` can reach it. Every frame gets the
-    // world (the script decides it only runs in the top one); a new document gets a new one.
-    if (method === "Runtime.executionContextCreated") {
-      const ctx = params?.context
-      if (ctx?.name === WORLD && typeof ctx.auxData?.frameId === "string") worlds.set(ctx.auxData.frameId, ctx.id)
-      return
-    }
-    if (method === "Runtime.executionContextDestroyed") {
-      for (const [frame, id] of worlds) if (id === params?.executionContextId) worlds.delete(frame)
-      return
-    }
-    if (method === "Runtime.executionContextsCleared") return void worlds.clear()
-    if (method === "Page.frameNavigated") {
-      if (params?.frame && !params.frame.parentId) topFrame = params.frame.id
-      return
-    }
-    if (method !== "Runtime.bindingCalled" || params?.name !== "__review") return
+  // ── overlay → main: window.__review in the preload's world, over IPC ─────────────────────────
+  // The preload runs in the top frame only, and the placeholder gets no overlay (page-preload.ts).
+  wc.ipc.on(FROM_OVERLAY, (event: IpcMainEvent, payload: unknown) => {
+    // Only the document now in the top frame speaks for the overlay; not one that just left.
+    if (event.senderFrame !== wc.mainFrame || typeof payload !== "string") return
     let msg: unknown
     try {
-      msg = JSON.parse(params.payload)
+      msg = JSON.parse(payload)
     } catch {
-      return // the page itself can call the binding with anything
+      return
     }
     if (typeof msg !== "object" || msg === null || !PAGE_EVENTS.has((msg as { type?: unknown }).type as string)) return
-    // The binding lives in the page's own world (see attach), so the page's scripts can call it
-    // too. A note becomes instructions to a coding agent in the reviewer's name: let one through
-    // only when the reviewer just pressed Enter in this view, and only one per Enter. A script
-    // can't fake that: before-input-event sees real input, not events the page dispatches.
-    // (A page that waits for the reviewer's own Enter can still slip its note in ahead of the
-    // real one; closing that needs the isolated world.)
+    // The page's scripts can't reach window.__review: it is in the preload's world. This is a
+    // second lock behind that one. A note becomes instructions to a coding agent in the
+    // reviewer's name: let one through only when the reviewer just pressed Enter in this view,
+    // and only one per Enter. A script can't fake that: before-input-event sees real input, not
+    // events the page dispatches.
     // A note can also be sent with a button (the note card's ↵, the edit bar's Send): a real click
     // in this view just before counts as the Enter does, once. That is weaker than Enter alone (a
     // page could slip its own note in right after any click of the reviewer's), a trade made
@@ -187,58 +183,36 @@ export async function createPage(window: BrowserWindow, opts: Options): Promise<
       log("error", "page: handling an overlay message failed", { type: (msg as PageMessage).type, error: String(err) })
     }
   })
-  // Opening devtools on the view takes the debugger away, and so does a renderer crash. Without
-  // it the next document gets no overlay, so say so and take it back before the next load.
-  wc.debugger.on("detach", (_event, reason) => {
-    attached = false
-    worlds.clear()
-    if (!gone()) log("warn", "page: debugger detached, the overlay returns with the next load", { reason })
+  // A preload that fails (a missing file, an error in it) leaves the page without the overlay.
+  wc.on("preload-error", (_event, file, err) => {
+    overlayError = `Review overlay unavailable: ${String(err)}`
+    log("error", "page: the overlay's preload failed, pages load without it", { file, error: String(err) })
+    opts.onChange()
   })
 
-  const gone = () => disposed || wc.isDestroyed()
-
-  async function attach(): Promise<void> {
-    if (attached || gone()) return
-    try {
-      wc.debugger.attach("1.3")
-      await wc.debugger.sendCommand("Runtime.enable")
-      await wc.debugger.sendCommand("Page.enable")
-      const tree = await wc.debugger.sendCommand("Page.getFrameTree")
-      topFrame = tree?.frameTree?.frame?.id ?? ""
-      // __review and the overlay go in a world of their own: the page's scripts can't call the
-      // one or read the other. The Enter check above stays as a second lock.
-      await wc.debugger.sendCommand("Runtime.addBinding", { name: "__review", executionContextName: WORLD })
-      await wc.debugger.sendCommand("Page.addScriptToEvaluateOnNewDocument", { source: inject, worldName: WORLD })
-      // What a framework calls an element is in the page's own objects: that one lookup runs among
-      // the page's scripts and answers the overlay through an event on the element (see component.js).
-      if (opts.lookup) await wc.debugger.sendCommand("Page.addScriptToEvaluateOnNewDocument", { source: top(opts.lookup) })
-      attached = true
-      overlayError = undefined
-    } catch (err) {
-      // Half-attached is worse than not: the next try would stop at "already attached".
-      try {
-        wc.debugger.detach()
-      } catch {}
-      overlayError = `Review overlay unavailable: ${String(err)}`
-      log("error", "page: debugger attach failed, pages load without the overlay", { error: String(err) })
+  // ── frames ───────────────────────────────────────────────────────────────────────────────────
+  function holdFrames(): () => void {
+    if (gone()) return () => {}
+    if (holds++ === 0) wc.setBackgroundThrottling(false)
+    let held = true
+    return () => {
+      if (!held) return
+      held = false
+      if (--holds === 0 && !gone()) wc.setBackgroundThrottling(true)
     }
   }
-
-  /** Every navigation the app starts goes through here, so a lost debugger is back before the
-   *  document that needs the overlay. */
-  function navigate(go: () => void) {
-    if (gone()) return
-    if (attached) return go()
-    void attach().then(() => {
-      if (gone()) return
-      go()
-      opts.onChange()
-    })
+  /** A real Enter or click may send a note, which the overlay does two frames later: the page
+   *  keeps drawing for as long as page.ts would count it (ENTER_WINDOW). */
+  function holdForInput() {
+    if (inputHold) clearTimeout(inputHold.timer)
+    const release = inputHold?.release ?? holdFrames()
+    inputHold = { release, timer: setTimeout(() => ((inputHold = undefined), release()), ENTER_WINDOW) }
   }
 
-  // A view that never loaded has no renderer, and CDP commands wait for one: load a blank page first.
-  await wc.loadURL("about:blank").catch(() => undefined)
-  await attach()
+  /** Navigations the app starts. */
+  function navigate(go: () => void) {
+    if (!gone()) go()
+  }
 
   // ── state ────────────────────────────────────────────────────────────────────────────────────
   function state(): PageState {
@@ -308,7 +282,9 @@ export async function createPage(window: BrowserWindow, opts: Options): Promise<
   })
 
   wc.on("before-mouse-event", (_event, mouse) => {
-    if (mouse.type === "mouseUp" && mouse.button === "left") clickAt = Date.now()
+    if (mouse.type !== "mouseUp" || mouse.button !== "left") return
+    clickAt = Date.now()
+    holdForInput()
   })
 
   // ── keys while the page has focus ────────────────────────────────────────────────────────────
@@ -316,7 +292,10 @@ export async function createPage(window: BrowserWindow, opts: Options): Promise<
   wc.on("before-input-event", (event, input) => {
     if (input.type !== "keyDown") return
     // Enter sends a note (alt+Enter to the background); remembered for the check in the message handler.
-    if (input.key === "Enter") enterAt = Date.now()
+    if (input.key === "Enter") {
+      enterAt = Date.now()
+      holdForInput()
+    }
     const mod = process.platform === "darwin" ? input.meta : input.control
     const key = input.key.toLowerCase()
     if (key === "f5" && !mod && !input.alt) {
@@ -356,19 +335,20 @@ export async function createPage(window: BrowserWindow, opts: Options): Promise<
 
   function send(msg: HostMessage) {
     if (gone()) return
-    // No overlay on the page (placeholder, mid-navigation) is not an error: it asks for state on "ready".
-    void overlay(`window.__b42 && window.__b42.receive(${JSON.stringify(JSON.stringify(msg))})`)
+    // No overlay on the page (placeholder, mid-navigation) is not an error: nothing listens, and
+    // the overlay asks for state on "ready".
+    try {
+      wc.send(TO_OVERLAY, JSON.stringify(msg))
+    } catch {}
   }
 
   /** Runs in the overlay's world of the top frame. Undefined when there is none, or on an error. */
   async function overlay(js: string): Promise<unknown> {
-    const contextId = worlds.get(topFrame)
-    if (gone() || !attached || contextId === undefined) return undefined
+    if (gone()) return undefined
     try {
-      const r = await wc.debugger.sendCommand("Runtime.evaluate", { expression: js, contextId, returnByValue: true })
-      return r?.exceptionDetails ? undefined : r?.result?.value
+      return await wc.executeJavaScriptInIsolatedWorld(WORLD, [{ code: js }])
     } catch {
-      return undefined // the document left while we asked
+      return undefined // a script error, or the document left while we asked
     }
   }
 
@@ -414,11 +394,13 @@ export async function createPage(window: BrowserWindow, opts: Options): Promise<
     reloadWhenIdle,
     evaluate: (js) => (gone() ? Promise.resolve(undefined) : wc.executeJavaScript(js, false).catch(() => undefined)),
     overlay,
+    holdFrames,
     focus: () => void (gone() || wc.focus()),
     dispose() {
       disposed = true
       clearTimeout(reloadTimer)
       clearTimeout(probeTimer)
+      if (inputHold) clearTimeout(inputHold.timer)
       if (!window.isDestroyed()) window.contentView.removeChildView(view)
       if (!wc.isDestroyed()) wc.close()
     },

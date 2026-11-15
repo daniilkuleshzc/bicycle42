@@ -9,7 +9,7 @@ import type {
   ChatUser,
   Commands,
   FileChange,
-  NoteStatus,
+  NoteRow,
   PermissionAsk,
   PermissionDecision,
   Question,
@@ -271,12 +271,14 @@ function Summary(props: { item: ChatAssistant }) {
   )
 }
 
-/** Note number → its live status, so a note in the conversation wears the same colour as its
- *  row in the list and its pin on the page. */
-const noteStatus = createRoot(() =>
+/** Note number → its row on the list: one map for every message, not a search of the list per
+ *  message. A note in the conversation reads its live status from the row, so it wears the same
+ *  colour as the row and as its pin on the page. Only the list and the numbers are tracked, so a
+ *  status that flips touches one badge and builds no new map. */
+const noteByNumber = createRoot(() =>
   createMemo(() => {
-    const map = new Map<number, NoteStatus>()
-    for (const n of state.review.notes) map.set(n.n, n.status)
+    const map = new Map<number, NoteRow>()
+    for (const n of state.review.notes) map.set(n.n, n)
     return map
   }),
 )
@@ -285,7 +287,7 @@ function User(props: { item: ChatUser }) {
   return (
     <div class="msg user" classList={{ pending: props.item.pending }} data-item={props.item.id}>
       <Show
-        when={props.item.note && state.review.notes.find((n) => n.n === props.item.note!.n)}
+        when={props.item.note && noteByNumber().get(props.item.note.n)}
         fallback={
           <div class="user-line">
             <Show when={props.item.note}>
@@ -309,7 +311,7 @@ function User(props: { item: ChatUser }) {
               setOpenedNote(row().id)
             }}
           >
-            <span class="badge" data-status={noteStatus().get(row().n) ?? "gone"}>
+            <span class="badge" data-status={row().status}>
               {row().n}
             </span>
             <span class="user-text">{props.item.note!.text}</span>
@@ -321,7 +323,7 @@ function User(props: { item: ChatUser }) {
           <For each={props.item.images}>
             {(img, i) => (
               <button class="thumb" title={`Open ${img.name}`} aria-label={`Open picture ${i() + 1} of ${props.item.images.length}`} onClick={() => openLightbox(props.item.images, i())}>
-                <img src={img.src} alt="" />
+                <img src={img.src} alt="" loading="lazy" decoding="async" />
               </button>
             )}
           </For>
@@ -1197,7 +1199,7 @@ export function Chat(props: {
     if (!waiting.length) return chat.items
     // A waiting note is a row of the notes list already, and its own view has its Cancel: it is
     // not said a second time here. One taken off the list has no other place, so it stays.
-    const listed = noteStatus()
+    const listed = noteByNumber()
     return [...chat.items.filter((item) => !(item.kind === "user" && item.pending)), ...waiting.filter((item) => !(item.kind === "user" && item.note && listed.has(item.note.n)))]
   })
 
@@ -1232,6 +1234,18 @@ export function Chat(props: {
     onCleanup(() => width.disconnect())
     onCleanup(() => grow.disconnect())
   })
+  /** Brings a message to the middle of the transcript. The messages on the way that are drawn
+   *  for the first time as the scroll passes them (see chat.css: far ones are skipped) have
+   *  heights it could not know when it was aimed, so it is aimed once more where it ends, unless
+   *  the reader has taken over by then. */
+  const centre = (el: HTMLElement, behavior: ScrollBehavior) => {
+    el.scrollIntoView({ block: "center", behavior })
+    const done = new AbortController()
+    const stop = () => done.abort()
+    for (const type of ["wheel", "pointerdown", "keydown", "touchstart"]) addEventListener(type, stop, { capture: true, passive: true, signal: done.signal })
+    scroller.addEventListener("scrollend", () => (stop(), el.scrollIntoView({ block: "center", behavior })), { once: true, signal: done.signal })
+    setTimeout(stop, 3000)
+  }
   /** The main-lane note the agent is on now, named in the "Working" line. */
   const workingNote = createMemo(() => state.review.notes.find((n) => n.lane === "main" && n.status === "working"))
 
@@ -1258,7 +1272,7 @@ export function Chat(props: {
         if (!el) return
         stuck = false
         const still = matchMedia("(prefers-reduced-motion: reduce)").matches
-        el.scrollIntoView({ block: "center", behavior: still ? "auto" : "smooth" })
+        centre(el, still ? "auto" : "smooth")
         el.classList.remove("flash")
         void el.offsetWidth // restart the animation when the same pin is clicked again
         el.classList.add("flash")

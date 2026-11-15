@@ -18,7 +18,7 @@ import { root } from "../mount.js";
 
 // ── drags ───────────────────────────────────────────────────────────────────────────────────
 // pointermove only records where the pointer is. The frame does the work: it measures once when
-// the drag starts (sizes, siblings), then each frame computes one value and writes one rule.
+// the drag starts (sizes, siblings), then each frame computes one value and writes it once.
 export function cvDown(e, z) {
   hush();
   if (C.pop) setPop(C.pop);
@@ -127,12 +127,12 @@ function startResize(d, z) {
     peers: P ? flow(P).filter((it) => it.el !== el).slice(0, 40).map((it) => it.r) : [] });
   d.w = d.w0;
   d.h = d.h0;
-  if (d.unflex) liveSet(d.sel, "flex", "none");
+  if (d.unflex) liveSet(el, d.sel, "flex", "none");
   // How far does the dragged edge move per pixel of size? A centred element grows both ways (½).
   const probe = (prop, v0, far, near) => {
-    liveSet(d.sel, prop, px(v0 + 16));
+    liveSet(el, d.sel, prop, px(v0 + 16));
     const r = rectOf(el);
-    liveSet(d.sel, prop, px(v0));
+    liveSet(el, d.sel, prop, px(v0));
     const moved = far ? r[near] + r[far] - (r0[near] + r0[far]) : r0[near] - r[near];
     return moved > 5 && moved < 11 ? 0.5 : 1;
   };
@@ -182,7 +182,7 @@ function startMove(d, el) {
     lines.push({ k: others.length, x: x1, y: end.y + end.h + 5, w: x2 - x1, h: 0 });
   }
   Object.assign(d, { mode: "move", el, P, pr: rectOf(P), layout, others, self, lines, r0: items[self].r, k: self, at: null });
-  liveSet(C.selRs, "opacity", "0.35");
+  liveSet(el, C.selRs, "opacity", "0.35");
 }
 
 export function stepDrag(d) {
@@ -204,13 +204,13 @@ export function stepDrag(d) {
   const n = (v) => String(Math.round(v));
   if (d.mode === "resize") {
     const z = d.zone;
-    if (z.hx) liveSet(d.sel, "width", px((d.w = snap(d.w0 + (z.hx * dx) / d.kx, d.peers.map((r) => d.w0 + r.w - d.r0.w)))));
-    if (z.hy) liveSet(d.sel, "height", px((d.h = snap(d.h0 + (z.hy * dy) / d.ky, d.peers.map((r) => d.h0 + r.h - d.r0.h)))));
+    if (z.hx) liveSet(d.el, d.sel, "width", px((d.w = snap(d.w0 + (z.hx * dx) / d.kx, d.peers.map((r) => d.w0 + r.w - d.r0.w)))));
+    if (z.hy) liveSet(d.el, d.sel, "height", px((d.h = snap(d.h0 + (z.hy * dy) / d.ky, d.peers.map((r) => d.h0 + r.h - d.r0.h)))));
     d.label = z.hx && z.hy ? `${n(d.w0)} × ${n(d.h0)} → ${n(d.w)} × ${n(d.h)}` : z.hx ? `width ${n(d.w0)} → ${n(d.w)}` : `height ${n(d.h0)} → ${n(d.h)}`;
   } else if (d.mode === "space") {
     const z = d.zone;
     d.val = snap(d.v0 + (z.axis === "x" ? dx : dy), d.near);
-    liveSet(d.sel, z.prop, px(d.val));
+    liveSet(d.el, d.sel, z.prop, px(d.val));
     d.label = `${z.prop} ${n(d.v0)} → ${n(d.val)}`;
   } else if (d.mode === "move") {
     // The nearest insertion line, in the coordinates the lines were measured in.
