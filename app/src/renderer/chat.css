@@ -522,6 +522,26 @@
   opacity: 1;
 }
 
+/* ── a long conversation ──────────────────────────────────────────────────────────────────── */
+
+/* A message far from the view is neither laid out nor painted: a frame costs what is on screen,
+   not the whole conversation. Until it is first drawn it counts as 160px tall, and afterwards as
+   tall as it was then. Drawn, it paints only this far outside its box: enough for a tool row's
+   hover background (8px out) and the focus ring around it. */
+.transcript-content > .msg {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 160px;
+  overflow-clip-margin: 12px;
+}
+
+/* A message above the view that is drawn for the first time (the reader scrolls up into it)
+   changes from that guess to its real height. While the reader is up in the conversation the
+   browser keeps what they are reading where it is; at the end the transcript follows the newest
+   output itself (Chat's ResizeObserver), and the browser's anchoring stays off there. */
+.transcript-wrap.away > .transcript {
+  overflow-anchor: auto;
+}
+
 /* ── code scrollbars ──────────────────────────────────────────────────────────────────────── */
 
 .md pre,

@@ -1,7 +1,7 @@
 // The right panel: what is wrong with the connection, the notes list, a divider, the
 // conversation. Before the site has a code folder, the folder picker takes the whole panel; before
 // there is a site, the panel shows how far setup has come.
-import { For, Match, Show, Switch, createEffect, createMemo, createResource, createSignal, on, onCleanup } from "solid-js"
+import { For, Match, Show, Switch, createEffect, createMemo, createResource, createSelector, createSignal, on, onCleanup } from "solid-js"
 import type { NoteRow } from "../shared/types"
 import { Chat } from "./chat"
 import { SetupSteps, serverLabel } from "./connect"
@@ -124,6 +124,9 @@ function Notes(props: { listHeight: number; open: boolean; onToggle: () => void;
     return ns.length === 1 ? `Note ${ns[0]}` : `Notes ${ns.slice(0, -1).join(", ")} and ${ns[ns.length - 1]}`
   }
   const rows = new Map<string, HTMLLIElement>()
+  /** The row of the pin clicked last: a click touches the row it leaves and the row it lands on,
+   *  not every row. */
+  const focused = createSelector(() => focusedNote()?.id)
 
   // A pin was clicked on the page: bring its row into view and flash it.
   createEffect(
@@ -252,7 +255,7 @@ function Notes(props: { listHeight: number; open: boolean; onToggle: () => void;
                   <li
                     class="note"
                     ref={(el) => rows.set(note.id, el)}
-                    aria-current={focusedNote()?.id === note.id ? "true" : undefined}
+                    aria-current={focused(note.id) ? "true" : undefined}
                   >
                     <div class="note-line">
                       <button
