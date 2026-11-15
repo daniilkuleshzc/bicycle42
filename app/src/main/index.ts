@@ -988,6 +988,8 @@ async function afterPicture(s: Site, id: string) {
   if (!p || !shot) return
   // A note taken back meanwhile has nothing to show: the area is as it was before it.
   const here = () => page === p && site === s && s.review.note(id)?.status === "done" && !s.review.note(id)?.takenBack && samePage(p.state().url, shot.url)
+  // It waits on the page's frames (two, with the layer hidden), in a hidden window too.
+  const frames = p.holdFrames()
   try {
     await sleep(AFTER_WAIT)
     for (let i = 0; i < AFTER_TRIES && here() && (p.state().loading || (await p.overlay("window.__b42 ? window.__b42.busy() : false"))); i++) await sleep(500)
@@ -1010,6 +1012,8 @@ async function afterPicture(s: Site, id: string) {
     }
   } catch (err) {
     log("warn", "no picture of the note's area after the agent was done", say(err))
+  } finally {
+    frames()
   }
 }
 
@@ -1183,6 +1187,8 @@ async function onNote(s: Site, pn: PageNote) {
   let files: PromptFile[] = []
   let before: NativeImage | undefined
   const pasted = pn.images ?? []
+  // The page draws while its pictures are taken, in a hidden window too (the overlay's answers come a frame or two later).
+  const frames = page?.holdFrames()
   try {
     // The overlay hid its note card and pins two frames ago; outlines and strokes stay drawn.
     const shot = page ? await page.capture() : undefined
@@ -1199,7 +1205,8 @@ async function onNote(s: Site, pn: PageNote) {
     page?.send({ type: "captured", id: pn.id })
     log("warn", "screenshot failed; the note goes without one", say(err))
   }
-  const shots = (before ? files.length - 1 : files.length) as 0 | 1 | 2
+  frames?.()
+  const shots =(before ? files.length - 1 : files.length) as 0 | 1 | 2
   const text = notePrompt(pn, note.n, { images: shots, references: pasted.length, before: !!before })
   const payload = { text, files: [...files, ...pasted] }
   outbox.set(note.id, payload)
@@ -2046,6 +2053,7 @@ function menu() {
           { role: "togglefullscreen" },
           { type: "separator" },
           { label: "Developer Tools: App", accelerator: "Alt+CmdOrCtrl+I", click: () => window?.webContents.openDevTools({ mode: "detach" }) },
+          // The overlay is the page's preload, not a debugger's: open or closed, the tools leave it be.
           { label: "Developer Tools: Page", accelerator: "Alt+CmdOrCtrl+J", click: () => page?.view.webContents.openDevTools({ mode: "detach" }) },
         ],
       },
@@ -2092,8 +2100,7 @@ async function createWindow() {
   })
 
   page = await createPage(win, {
-    overlay: fs.readFileSync(path.join(__dirname, "overlay.js"), "utf8"),
-    lookup: fs.readFileSync(path.join(__dirname, "overlay-lookup.js"), "utf8"),
+    preload: path.join(__dirname, "page-preload.cjs"),
     onMessage: onPage,
     onChange() {
       const url = page?.state().url ?? ""

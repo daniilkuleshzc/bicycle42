@@ -63,8 +63,7 @@ async function main() {
   /** What the host hands back on "ready": the unsent note, as the overlay last reported it. */
   let draft: unknown = null
   const page = await createPage(win, {
-    overlay: fs.readFileSync(path.join(__dirname, "overlay.js"), "utf8"), // built beside this test
-    lookup: fs.readFileSync(path.join(__dirname, "overlay-lookup.js"), "utf8"),
+    preload: path.join(__dirname, "../page-preload.cjs"), // dist/, built with this test
     partition: "page-e2e", // in memory: nothing kept between runs
     onMessage(msg) {
       messages.push(msg)
@@ -112,6 +111,13 @@ async function main() {
   await until(() => count("ready") === 1)
   check('overlay injected, "ready" arrives', count("ready") === 1 && (await page.overlay("!!window.__b42")) === true && (await js(`!!${shadow}`)))
   check("the page's own scripts see neither the overlay nor its way to the app", (await js("typeof window.__b42 + ' ' + typeof window.__review")) === "undefined undefined")
+  // Nor anything else of the preload's: no IPC, no Node, no Electron, under any name.
+  const leaked = (await js(
+    `["__review", "__b42", "ipcRenderer", "require", "process", "electron", "b42"].filter((k) => k in window)` +
+      `.concat(Object.getOwnPropertyNames(window).filter((k) => /ipc|electron|__b42|__review/i.test(k)))`,
+  )) as string[]
+  check("…nor an IPC handle or anything of the preload's", Array.isArray(leaked) && leaked.length === 0, JSON.stringify(leaked))
+  check("the overlay's world has its way to the app", (await page.overlay("typeof window.__review")) === "function")
   const ready = messages.find((m) => m.type === "ready")
   check('"ready" carries the page URL', ready?.url === first, String(ready?.url))
   await until(() => !page.state().loading)
@@ -130,7 +136,10 @@ async function main() {
   win.showInactive()
 
   // ── act like a reviewer: click the hero button, type, press Enter ──────────────────────────
+  // The page has no debugger of its own any more: the test brings one, for input only.
+  check("the page runs without a debugger attached", !wc.debugger.isAttached())
   const dbg = wc.debugger
+  dbg.attach("1.3")
   // The window is not the active one, so the page never has OS focus; emulate it so the note card can take keys.
   await dbg.sendCommand("Emulation.setFocusEmulationEnabled", { enabled: true })
   const mouse = (type: string, x: number, y: number, extra = {}) =>
@@ -731,11 +740,12 @@ async function main() {
     check("mod+P goes back to notes", (await until(async () => !(await shown("insp")), 2000)) === true)
   }
 
-  // Devtools (or a crash) takes the debugger; the overlay must be back with the next load.
+  // The overlay needs no debugger: with the test's gone and the page's devtools open, the next
+  // document has it all the same.
   wc.debugger.detach()
-  await until(() => logs.some((l) => l.includes("debugger detached")), 2000)
-  check("losing the debugger is logged", logs.some((l) => l.startsWith("warn") && l.includes("debugger detached")))
-  check("…and the overlay returns with the next load", (await readyAgain(() => page.reload())) && page.state().error === undefined)
+  wc.openDevTools({ mode: "detach" })
+  check("with devtools open the overlay comes with the next load", (await readyAgain(() => page.reload())) && page.state().error === undefined && (await page.overlay("!!window.__b42")) === true)
+  wc.closeDevTools()
 
   // ── hide, dispose ──────────────────────────────────────────────────────────────────────────
   page.setBounds(null)

@@ -1,9 +1,10 @@
 // Builds the app into dist/:
 //   main.cjs      the Electron main process          (esbuild, src/main/index.ts)
 //   preload.cjs   the bridge into the app window      (esbuild, src/preload.ts)
+//   page-preload.cjs  the page under review's preload (esbuild, src/page-preload.ts), with the
+//                 shared in-page review layer built into it (../overlay/src: the overlay's own
+//                 build does that part, see ../../overlay/scripts/build.mjs)
 //   renderer/     the app window's UI                 (vite + solid, src/renderer)
-//   overlay.js    the shared in-page review layer     (esbuild, ../overlay/src: the overlay's own
-//                                                     build does it, see ../../overlay/scripts/build.mjs)
 //   icon.png      the app icon, when there is one     (copied from ../assets)
 //   test/         with --tests: every test/*.ts bundled to .cjs
 //
@@ -32,9 +33,27 @@ const node = {
   absWorkingDir: root,
 }
 
+// The page's preload carries the overlay, since a sandboxed preload can't read it from disk. Its
+// "b42:page-overlay" is overlay.js and overlay-lookup.js, each the body of a function, built anew
+// with every build of the preload.
+const pageOverlay = {
+  name: "page-overlay",
+  setup(b) {
+    b.onResolve({ filter: /^b42:page-overlay$/ }, () => ({ path: "page-overlay", namespace: "b42" }))
+    b.onLoad({ filter: /.*/, namespace: "b42" }, () => ({
+      contents: `export function overlay() {\n${buildOverlay()}\n}\nexport function lookup() {\n${buildLookup()}\n}\n`,
+      loader: "js",
+      resolveDir: root,
+    }))
+  },
+}
+
 const entries = [
   { entryPoints: ["src/main/index.ts"], outfile: "dist/main.cjs" },
   { entryPoints: ["src/preload.ts"], outfile: "dist/preload.cjs" },
+  // Runs in the page's renderer, which is Chromium, not Node. Main reads it again for every
+  // document the page loads, so it goes without the inline source map.
+  { entryPoints: ["src/page-preload.ts"], outfile: "dist/page-preload.cjs", plugins: [pageOverlay], target: "chrome140", sourcemap: false },
 ]
 if (flags.has("--tests")) {
   const tests = fs.readdirSync(path.join(root, "test")).filter((f) => f.endsWith(".ts"))
@@ -65,20 +84,9 @@ const controller = flags.has("--tests")
   : undefined
 
 fs.mkdirSync(dist, { recursive: true })
-const overlay = buildOverlay()
-fs.writeFileSync(path.join(dist, "overlay.js"), overlay)
-// The overlay has a script world of its own; this small one goes among the page's scripts.
-const lookup = buildLookup()
-fs.writeFileSync(path.join(dist, "overlay-lookup.js"), lookup)
 // The app icon, for the window and the macOS dock. The app runs without it.
 const icon = path.join(root, "../assets/icon.png")
 if (fs.existsSync(icon)) fs.copyFileSync(icon, path.join(dist, "icon.png"))
-if (controller) {
-  // The stubbed controller reads the overlay from beside itself, like the real one.
-  fs.mkdirSync(path.join(dist, "test"), { recursive: true })
-  fs.writeFileSync(path.join(dist, "test/overlay.js"), overlay)
-  fs.writeFileSync(path.join(dist, "test/overlay-lookup.js"), lookup)
-}
 
 const renderer = {
   root: path.join(root, "src/renderer"),
@@ -89,21 +97,24 @@ const renderer = {
 }
 
 if (watch) {
-  for (const e of entries) await (await context({ ...node, ...e })).watch()
+  const contexts = []
+  for (const e of entries) {
+    const ctx = await context({ ...node, ...e })
+    await ctx.watch()
+    contexts.push(ctx)
+  }
   await viteBuild(renderer)
-  // An edit in ../overlay/src builds dist/overlay.js again, once the edits pause. A failed build
-  // keeps the last one and the watching.
+  // An edit in ../overlay/src builds dist/page-preload.cjs again, once the edits pause: esbuild
+  // does not watch what its plugin reads. A failed build keeps the last one and the watching.
+  const pagePreload = contexts[entries.findIndex((e) => e.outfile === "dist/page-preload.cjs")]
   let timer
   fs.watch(path.join(root, "../overlay/src"), { recursive: true }, () => {
     clearTimeout(timer)
     timer = setTimeout(() => {
-      try {
-        fs.writeFileSync(path.join(dist, "overlay.js"), buildOverlay())
-        fs.writeFileSync(path.join(dist, "overlay-lookup.js"), buildLookup())
-        console.log("overlay.js rebuilt")
-      } catch (e) {
-        console.error(`overlay.js not rebuilt: ${e.message}`)
-      }
+      pagePreload.rebuild().then(
+        () => console.log("page-preload.cjs rebuilt with the overlay"),
+        (e) => console.error(`page-preload.cjs not rebuilt: ${e.message}`),
+      )
     }, 100)
   })
   console.log("watching…")

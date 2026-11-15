@@ -194,6 +194,7 @@ async function main() {
     const wc = page.view.webContents
     const js = (code: string) => wc.executeJavaScript(code)
     const dbg = wc.debugger
+    dbg.attach("1.3") // the test's own, for input: the page has none
     const shadow = "document.querySelector('b42-review')?.shadowRoot"
     /** The layer is in the page, answering, and not hidden. */
     const overlayOn = async () => (await page.overlay("!!window.__b42")) === true && (await js(`(() => { const el = document.querySelector("b42-review"); return !!el && getComputedStyle(el).visibility !== "hidden" })()`)) === true

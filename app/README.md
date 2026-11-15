@@ -12,10 +12,12 @@ bun run dev          # rebuilds on change; start Electron yourself with `electro
 bun run typecheck
 ```
 
-`scripts/build.mjs` bundles main and preload with esbuild, the window with Vite and Solid, and
-puts the overlay and `../assets/icon.png` beside them. The overlay is built by its own script
+`scripts/build.mjs` bundles main and the two preloads with esbuild, the window with Vite and
+Solid, and puts `../assets/icon.png` beside them. The overlay is built by its own script
 (`../overlay/scripts/build.mjs`, esbuild over `../overlay/src`), with the overlay's esbuild,
-or the app's when the overlay's packages are not installed.
+or the app's when the overlay's packages are not installed, and goes into the page's preload
+(`dist/page-preload.cjs`): a sandboxed preload can't read a file. `bun run dev` builds that
+preload again when `../overlay/src` changes.
 
 Settings and notes live in the app's user-data folder (`~/.config/bicycle42` on Linux);
 `BICYCLE42_DATA=/some/folder` puts them elsewhere.
@@ -49,7 +51,8 @@ node scripts/build.mjs && node_modules/.bin/electron --ozone-platform=headless -
 src/shared/types.ts     the contract: AppState, ChatEvent, Commands, Backend. Read this first.
 ../overlay/protocol.ts  the page's side of it: the overlay's messages and a note's shape, shared with the overlay
 src/main/index.ts       controller: owns AppState, wires the four parts below
-src/main/page.ts        the page: a WebContentsView with the overlay injected over CDP, in its own script world
+src/main/page.ts        the page: a WebContentsView with the overlay as its preload, in its own script world
+src/page-preload.ts     the overlay's way into the page and back to main (IPC), built with the overlay inside
 src/main/review.ts      a site's notes and their status rules (pure, no Electron)
 src/main/outbox.ts      what each unfinished note sends (prompt, pictures), on disk until it is done
 src/main/images.ts      screenshot → area crop + viewport thumbnail
@@ -97,13 +100,22 @@ src/renderer/           the window: top bar, notes list, chat (Solid, @kkrll/des
   newest message of an idle conversation: an exact undo) or "asked" (the agent is asked to
   reverse it); the view puts that in its question and hands it to `takeBackNote`, which does
   nothing when the conversation has moved to the other way meanwhile.
-- **The page is untrusted.** The overlay and its way to the app (`window.__review`) are in a
-  script world of their own (`WORLD` in `page.ts`): they share the page's document, but the
-  site's scripts can't call the one or reach into the other. As a second lock, a note counts
+- **The page is untrusted.** The overlay and its way to the app (`window.__review`, which
+  sends over IPC) are the view's preload (`page-preload.ts`), which Electron runs before the
+  page's scripts in a script world of its own (`contextIsolation`; `WORLD` in `page.ts`), in
+  the top frame only: they share the page's document, but the site's scripts can't call the
+  one or reach into the other, and see no IPC handle. As a second lock, a note counts
   only right after a real Enter key press in the page (or a real click, for a Send button).
-  One small script does run among the page's own (`overlay/src/lookup.js`, with `component.js`): what React or
+  One small script does run among the page's own (`overlay/src/lookup.js`, with `component.js`,
+  put there by the preload with `contextBridge.executeInMainWorld`): what React or
   Vue calls an element is in the page's objects, so it reads that there and answers the overlay
   through an event; the answer is checked like anything else the page says.
+  No debugger is attached to the page, so its console stays in its own process, and
+  Developer Tools: Page can be open without taking the overlay away.
+- **The page is throttled in the background**, like a browser tab: in a hidden or minimised
+  window it draws nothing. `page.holdFrames()` lifts that while it needs frames: for a note's
+  pictures, the picture after the agent is done, and the second after a real Enter or click in
+  the page (the overlay sends a note two frames after it).
   Page text is quoted in the prompt as data.
   A canvas note's edits are checked field by field (`pageEdits` in `review.ts`): at most 40, known
   kinds, short one-line strings, a property name that looks like one. What fails is dropped.

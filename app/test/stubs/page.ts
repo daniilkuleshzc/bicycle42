@@ -44,6 +44,7 @@ export async function createPage(_window: unknown, opts: Options): Promise<Page>
     evaluate: async (js: string) => pageStub.evaluate?.(js),
     // The overlay is never mid-note here.
     overlay: async () => false,
+    holdFrames: () => () => {},
     focus() {},
     dispose() {},
   } as unknown as Page

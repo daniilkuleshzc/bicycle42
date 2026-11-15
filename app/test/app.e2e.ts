@@ -163,6 +163,8 @@ async function main() {
   const wc = page.view.webContents
   const js = (code: string) => wc.executeJavaScript(code)
   const dbg = wc.debugger
+  check("the page runs without a debugger attached", !dbg.isAttached())
+  dbg.attach("1.3") // the test's own, for input
   const shadow = "document.querySelector('b42-review')?.shadowRoot"
   await until(() => js(`${shadow}?.querySelector('.pins')?.classList.contains('live') ?? false`))
   await dbg.sendCommand("Emulation.setFocusEmulationEnabled", { enabled: true })
