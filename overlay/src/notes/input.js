@@ -4,7 +4,7 @@
 import { DRAG_PX, mod, S, send } from "../state.js";
 import { elementsIn, pick, strokeTargets, toView } from "../page.js";
 import { draftChanged, restoreDraft, serializeDraft } from "../draft.js";
-import { autosize, openCard, updateCardMeta } from "./card.js";
+import { openCard, updateCardMeta } from "./card.js";
 import { drawMenu, pickTemplate, setTemplate, updateMenu } from "./templates.js";
 import { setImages } from "./pictures.js";
 import { clearDraft, hasDraft } from "./draft.js";
@@ -121,7 +121,6 @@ export function key(e) {
       // First Esc closes the template list and keeps the selection.
       textarea.value = "";
       updateMenu();
-      autosize();
     } else if (S.card || hasDraft()) {
       // Typed words are not thrown away on a slip: for a few seconds mod+Z brings the note back.
       const kept = textarea.value.trim() ? { ...serializeDraft(), images: S.images } : null;

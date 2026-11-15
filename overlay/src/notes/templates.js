@@ -1,6 +1,6 @@
 import { S } from "../state.js";
 import { draftChanged } from "../draft.js";
-import { autosize, drawCardSend, PLACEHOLDER } from "./card.js";
+import { drawCardSend, PLACEHOLDER } from "./card.js";
 import { chip, menuEl, textarea } from "./mount.js";
 import { kick } from "../render.js";
 
@@ -55,7 +55,6 @@ export function drawMenu() {
 export function pickTemplate(t) {
   textarea.value = "";
   setTemplate(t.name);
-  autosize();
   draftChanged();
   textarea.focus({ preventScroll: true });
 }

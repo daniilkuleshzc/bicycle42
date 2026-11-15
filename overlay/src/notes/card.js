@@ -46,7 +46,6 @@ export function openCard() {
   S.undo = null;
   S.card = true;
   updateCardMeta();
-  autosize();
   if (S.enabled) {
     card.hidden = false;
     textarea.focus({ preventScroll: true });
@@ -79,11 +78,6 @@ export function closeCard() {
   card.hidden = true;
   setHint("");
   if (root && root.activeElement === textarea) textarea.blur();
-}
-
-export function autosize() {
-  textarea.style.height = "auto";
-  textarea.style.height = `${Math.min(textarea.scrollHeight, 240)}px`;
 }
 
 // A stroke's box in document coordinates, worked out once: a stroke is never changed after it
