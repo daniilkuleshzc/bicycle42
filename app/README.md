@@ -52,10 +52,11 @@ src/main/index.ts       controller: owns AppState, wires the four parts below
 src/main/page.ts        the page: a WebContentsView with the overlay injected over CDP, in its own script world
 src/main/review.ts      a site's notes and their status rules (pure, no Electron)
 src/main/outbox.ts      what each unfinished note sends (prompt, pictures), on disk until it is done
-src/main/images.ts      screenshot → area crop + viewport thumbnail
+src/main/images.ts      screenshot → area crop + viewport thumbnail, each frame scaled once, yielding between steps
+src/main/queue.ts       one file operation at a time per key (outbox, shots)
 src/main/opencode.ts    the backend: fetch + one SSE stream → BackendEvents (no Electron)
 src/main/local.ts       finds the OpenCode server running on this computer
-src/main/store.ts       settings and notes on disk, versioned, atomic writes
+src/main/store.ts       settings and notes on disk, versioned, atomic writes off the main thread (flushed at quit)
 src/preload.ts          window.b42: the only door between the window and main
 src/renderer/           the window: top bar, notes list, chat (Solid, @kkrll/design tokens)
 ```
@@ -143,8 +144,12 @@ src/renderer/           the window: top bar, notes list, chat (Solid, @kkrll/des
   sends a lane's notes one at a time (`enqueue`, `pump` in `index.ts`): a note made while
   another is with the agent, or while a typed message runs, is held in the app (`held` in
   `review.ts`: "queued", with no conversation) and goes when that run ends. A stop or an
-  agent's error leaves the rest waiting until something is sent again. What a held note sends
-  is on disk (`outbox.ts`), so it is still sent after a restart.
+  agent's error leaves the rest waiting until something is sent again. Whether a conversation
+  is busy is what the event stream last said of its runs (`busy` in `index.ts`); the server is
+  asked only when the stream has said nothing since it connected, reconnected or had a gap, and
+  a message typed in the chat counts as a run from the moment it is sent. What a held note sends
+  is on disk (`outbox.ts`), so it is still sent after a restart; a note goes only once that
+  file has its message id.
 - **A waiting note is said once.** The server's queue holds notes and typed messages alike, and
   the conversation gets both as waiting items; the window leaves out the ones that are notes on
   the list (`ordered` in `renderer/chat.tsx`), so only a typed message waits there, with its

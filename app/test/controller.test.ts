@@ -634,14 +634,72 @@ test("one note is one turn: the next goes when the one before is done, and not w
     turn(h, s)
     await until(() => h.notes() === "1:done 2:done 3:done")
 
-    // The agent is on a message typed in the chat: a note made now waits for that run to end.
+    // The agent is on a message typed elsewhere: once the stream says so, a note made now waits
+    // for that run to end.
     h.agent.starts(s)
+    await until(() => h.snap().session?.busy === true)
     h.note("d")
     await until(() => h.notes() === "1:done 2:done 3:done 4:queued")
     await sleep(100)
     assert.equal(h.w.prompts.length, 3, "nothing joins the running turn")
     h.agent.finishes(s)
     await until(() => h.w.prompts.length === 4)
+  } finally {
+    await h.close()
+  }
+})
+
+const sessionReads = (h: { server: FakeServer }, s: string) => h.server.requests.filter((r) => r.method === "GET" && r.path === `/api/session/${s}`).length
+
+test("a note goes on what the stream says: no question to the server while it says idle, none sent while it says busy", async () => {
+  const h = await boot()
+  try {
+    const s = await h.ready()
+    // Nothing said yet since the stream opened: the server is asked once, and that is kept.
+    h.note("a")
+    await until(() => h.w.prompts.length === 1)
+    turn(h, s)
+    await until(() => h.notes() === "1:done")
+    // The stream said the run ended: the next note goes without asking. (The stream's own
+    // re-reads of the conversation after run events are let finish first.)
+    await sleep(50)
+    const asked = sessionReads(h, s)
+    h.note("b")
+    await until(() => h.w.prompts.length === 2)
+    assert.equal(sessionReads(h, s), asked, "no GET /session before the note went")
+    turn(h, s)
+    await until(() => h.notes() === "1:done 2:done")
+
+    // A message typed in the chat starts a run: a note made right after waits, even before the
+    // stream says the run started.
+    let before = h.w.prompts.length
+    await h.cmd("send", "make the header blue")
+    h.note("c")
+    await until(() => h.notes() === "1:done 2:done 3:queued")
+    await sleep(100)
+    assert.equal(h.w.prompts.length, before + 1, "only the typed message went; the note waits")
+    assert.equal(h.snap().review.notes[2]?.sent, undefined)
+    h.agent.starts(s)
+    h.agent.finishes(s)
+    await until(() => h.w.prompts.length === before + 2)
+    before = h.w.prompts.length
+    turn(h, s)
+    await until(() => h.notes() === "1:done 2:done 3:done")
+
+    // A reconnect forgets what was known: the next note asks the server first, and does not go
+    // while it says busy.
+    h.server.drop()
+    await until(() => h.snap().connection.status === "online" && h.server.streams() === 1)
+    await sleep(50)
+    const w = h.w.sessions.get(s) as { time: Record<string, number> }
+    w.time.busy = (w.time.idle ?? 0) + 100
+    const reads0 = sessionReads(h, s)
+    h.note("d")
+    await until(() => h.notes() === "1:done 2:done 3:done 4:queued" && sessionReads(h, s) > reads0)
+    await sleep(100)
+    assert.equal(h.w.prompts.length, before, "busy on the server: the note waits")
+    h.agent.finishes(s)
+    await until(() => h.w.prompts.length === before + 1)
   } finally {
     await h.close()
   }

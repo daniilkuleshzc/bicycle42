@@ -227,6 +227,7 @@ test("saves are debounced: many changes, one write of the last state", async (t)
   assert.equal(fs.existsSync(file), false)
   assert.equal(fs.existsSync(settingsFile), false)
   await sleep(120)
+  await store.idle()
   assert.deepEqual(readJSON(file), { version: 1, i: 50 })
   assert.equal(readJSON(settingsFile).lastUrl, "http://x/50")
 
@@ -235,6 +236,7 @@ test("saves are debounced: many changes, one write of the last state", async (t)
   store.saveReview(ORIGIN, { version: 1, i: 51 })
   assert.equal(fs.statSync(file).mtimeMs, written)
   await sleep(120)
+  await store.idle()
   assert.deepEqual(readJSON(file), { version: 1, i: 51 })
 })
 
@@ -310,4 +312,104 @@ test("a temp file left by a crash is ignored", (t) => {
   store.flush()
   fs.writeFileSync(`${settingsFile}.tmp-99999`, '{"version":1,"sit')
   assert.equal(open().settings().lastUrl, "http://x/")
+})
+
+test("reviews are written on one line, and an indented file from before still reads", async (t) => {
+  const { open, reviews } = setup(t)
+  const review = createReview()
+  review.draft = { text: "half" }
+  fs.mkdirSync(reviews)
+  const file = path.join(reviews, "http%3A%2F%2Flocalhost%3A3000.json")
+  fs.writeFileSync(file, JSON.stringify(review.toJSON(), null, 2))
+  const store = open()
+  assert.deepEqual(store.loadReview(ORIGIN), review.toJSON(), "the indented file of an older version")
+  store.saveReview(ORIGIN, () => review.stored())
+  await store.idle()
+  const text = fs.readFileSync(file, "utf8")
+  assert.equal(text.includes("\n"), false, "no indentation")
+  assert.deepEqual(JSON.parse(text), review.toJSON())
+})
+
+test("a review given as a function is turned into text when the write is due, with what it holds then", async (t) => {
+  const { open, reviews } = setup(t)
+  const store = open(20)
+  let calls = 0
+  const state = { version: 1, i: 0 }
+  const give = () => (calls++, state)
+  for (let i = 1; i <= 30; i++) {
+    state.i = i
+    store.saveReview(ORIGIN, give)
+  }
+  assert.equal(calls, 0, "not serialised on every change")
+  assert.deepEqual(store.loadReview(ORIGIN), { version: 1, i: 30 }, "readable before it is written, as a copy")
+  await sleep(60)
+  await store.idle()
+  assert.deepEqual(readJSON(path.join(reviews, "http%3A%2F%2Flocalhost%3A3000.json")), { version: 1, i: 30 })
+})
+
+test("writes of one file never overlap, and the last state is the one left", async (t) => {
+  const { open, reviews } = setup(t)
+  const store = open(1)
+  const file = path.join(reviews, "http%3A%2F%2Flocalhost%3A3000.json")
+  // Watch the writes: at most one temp file of this review open at any time.
+  let inUse = 0
+  let most = 0
+  const realOpen = fs.promises.open
+  t.mock.method(fs.promises, "open", async (...args: Parameters<typeof fs.promises.open>) => {
+    const handle = await realOpen(...args)
+    if (String(args[0]).startsWith(file)) most = Math.max(most, ++inUse)
+    const close = handle.close.bind(handle)
+    handle.close = async () => {
+      if (String(args[0]).startsWith(file)) inUse--
+      return close()
+    }
+    return handle
+  })
+  for (let i = 1; i <= 40; i++) {
+    store.saveReview(ORIGIN, { version: 1, i, pad: "x".repeat(20_000) })
+    // Each one due on its own: forty writes asked for, a few milliseconds apart.
+    await sleep(i % 3 ? 0 : 3)
+  }
+  await store.idle()
+  t.mock.restoreAll()
+  assert.equal(most, 1, "one write of the file at a time")
+  assert.equal(readJSON(file).i, 40)
+  assert.deepEqual(fs.readdirSync(reviews).filter((f) => f.includes(".tmp-")), [], "no temp file left")
+  assert.deepEqual(open().loadReview(ORIGIN), readJSON(file))
+})
+
+test("a review read while its write is under way is the new one, not the file's old one", async (t) => {
+  const { open } = setup(t)
+  const store = open(1)
+  store.saveReview(ORIGIN, { version: 1, text: "old" })
+  await store.idle()
+  store.saveReview(ORIGIN, { version: 1, text: "new" })
+  await sleep(5)
+  assert.deepEqual(store.loadReview(ORIGIN), { version: 1, text: "new" })
+  await store.idle()
+  assert.deepEqual(open().loadReview(ORIGIN), { version: 1, text: "new" })
+})
+
+test("quit while a write is under way: flush puts the newest state on disk, and the older write does not land after it", async (t) => {
+  const { open, reviews } = setup(t)
+  const store = open(1)
+  const file = path.join(reviews, "http%3A%2F%2Flocalhost%3A3000.json")
+  store.saveReview(ORIGIN, { version: 1, text: "first" })
+  // Due, and handed to a write that has not finished.
+  await sleep(5)
+  store.saveReview(ORIGIN, { version: 1, text: "last" })
+  store.flush()
+  assert.deepEqual(readJSON(file), { version: 1, text: "last" }, "on disk when flush returns")
+  await store.idle()
+  await sleep(20)
+  assert.deepEqual(readJSON(file), { version: 1, text: "last" })
+
+  // A write under way with nothing newer behind it: flush still writes what it holds.
+  store.saveReview(ORIGIN, { version: 1, text: "only" })
+  await sleep(3)
+  store.flush()
+  assert.deepEqual(readJSON(file), { version: 1, text: "only" })
+  await store.idle()
+  assert.deepEqual(readJSON(file), { version: 1, text: "only" })
+  assert.deepEqual(fs.readdirSync(reviews).filter((f) => f.includes(".tmp-")), [])
 })
