@@ -1234,6 +1234,18 @@ export function Chat(props: {
     onCleanup(() => width.disconnect())
     onCleanup(() => grow.disconnect())
   })
+  /** Brings a message to the middle of the transcript. The messages on the way that are drawn
+   *  for the first time as the scroll passes them (see chat.css: far ones are skipped) have
+   *  heights it could not know when it was aimed, so it is aimed once more where it ends, unless
+   *  the reader has taken over by then. */
+  const centre = (el: HTMLElement, behavior: ScrollBehavior) => {
+    el.scrollIntoView({ block: "center", behavior })
+    const done = new AbortController()
+    const stop = () => done.abort()
+    for (const type of ["wheel", "pointerdown", "keydown", "touchstart"]) addEventListener(type, stop, { capture: true, passive: true, signal: done.signal })
+    scroller.addEventListener("scrollend", () => (stop(), el.scrollIntoView({ block: "center", behavior })), { once: true, signal: done.signal })
+    setTimeout(stop, 3000)
+  }
   /** The main-lane note the agent is on now, named in the "Working" line. */
   const workingNote = createMemo(() => state.review.notes.find((n) => n.lane === "main" && n.status === "working"))
 
@@ -1260,7 +1272,7 @@ export function Chat(props: {
         if (!el) return
         stuck = false
         const still = matchMedia("(prefers-reduced-motion: reduce)").matches
-        el.scrollIntoView({ block: "center", behavior: still ? "auto" : "smooth" })
+        centre(el, still ? "auto" : "smooth")
         el.classList.remove("flash")
         void el.offsetWidth // restart the animation when the same pin is clicked again
         el.classList.add("flash")
