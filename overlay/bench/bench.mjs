@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { build } from "../scripts/build.mjs";
 import { start, displayRate, open, measure, sleep } from "./rig.mjs";
-import { CELLS, METRICS, WINDOW_MS, invariants } from "./cells.mjs";
+import { CELLS, METRICS, WINDOW_MS, baseOf, invariants } from "./cells.mjs";
 
 const REPS = 3;
 const SETTLE_MS = 800; // after any input the overlay keeps drawing for 500 ms
@@ -32,7 +32,7 @@ const inShadow = (page, fn) => page.evaluate(`(${fn})(document.querySelector("b4
 
 /** One cell with one overlay file: a fresh page, the set-up, then REPS windows one after another. */
 async function runCell(rig, file, cell) {
-  const t = await open(rig, file, cell);
+  const t = await open(rig, cell.overlay === false ? null : file, cell);
   try {
     if (cell.setup) await cell.setup(t);
     await sleep(SETTLE_MS);
@@ -52,7 +52,9 @@ async function runCell(rig, file, cell) {
 
 const started = Date.now();
 const rig = await start();
-const cells = CELLS.filter((c) => !only || only.includes(c.id));
+// A cell's baseline (the same page and gesture with no overlay) is measured whenever the cell is.
+const wanted = only && new Set(only.flatMap((id) => [id, baseOf(CELLS.find((c) => c.id === id) || {})]));
+const cells = CELLS.filter((c) => !wanted || wanted.has(c.id));
 const results = files.map(() => ({})); // per file: { cell id: { metric: median, runs: [...] } }
 let fps;
 try {
@@ -71,16 +73,25 @@ try {
 // An exact zero prints as "0": "0.0" is something that happened, less than once in twenty seconds.
 const fmt = (key, v) => (v === 0 ? "0" : v.toFixed(key.endsWith("Ms") ? 2 : 1));
 const tags = files.length > 1 ? ["a", "b"] : [""];
-const rows = [["cell", ...(compare ? [""] : []), ...METRICS.map(([, heading]) => heading)]];
+// "own ms": busy ms less the baseline's, the same page and gesture without the overlay: what the
+// overlay itself costs. (Empty for the baselines, and when the baseline was not measured.)
+const own = (i, cell) => {
+  const base = cell.overlay === false ? null : results[i][baseOf(cell)];
+  return base ? fmt("busyMs", results[i][cell.id].busyMs - base.busyMs) : "";
+};
+const rows = [["cell", ...(compare ? [""] : []), METRICS[0][1], "own ms", ...METRICS.slice(1).map(([, heading]) => heading)]];
 for (const cell of cells)
-  for (const [i, tag] of tags.entries())
-    rows.push([i ? "" : cell.id, ...(compare ? [tag] : []), ...METRICS.map(([k]) => fmt(k, results[i][cell.id][k]))]);
+  for (const [i, tag] of tags.entries()) {
+    const m = METRICS.map(([k]) => fmt(k, results[i][cell.id][k]));
+    rows.push([i ? "" : cell.id, ...(compare ? [tag] : []), m[0], own(i, cell), ...m.slice(1)]);
+  }
 const widths = rows[0].map((_, c) => Math.max(...rows.map((r) => r[c].length)));
 const line = (r) => r.map((s, c) => (c === 0 ? s.padEnd(widths[c]) : s.padStart(widths[c]))).join("  ").trimEnd();
 
 console.log(`chromium ${rig.browser.version()} · the display shows ${fps.toFixed(1)} frames/s · ${((Date.now() - started) / 1000).toFixed(0)} s`);
 for (const [i, file] of files.entries()) console.log(`${tags[i] ? `${tags[i]}: ` : ""}${file}`);
-console.log(`\nper second, the median of ${REPS} windows of ${WINDOW_MS / 1000} s; frames, timers, writes (of a stroke's path) and searches (of the document) are the overlay's\n`);
+console.log(`\nper second, the median of ${REPS} windows of ${WINDOW_MS / 1000} s; own ms is busy ms less that of the same page and gesture with no overlay (the none cells);`);
+console.log(`frames, timers, writes (of a stroke's path) and searches (of the document) are the overlay's\n`);
 console.log(rows.map(line).join("\n"));
 
 // ── the invariants ──────────────────────────────────────────────────────────────────────────────
