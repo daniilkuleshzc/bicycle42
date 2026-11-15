@@ -489,8 +489,9 @@ export type InboxStatus = "queued" | "working" | "cancelled"
 export type BackendEvent =
   | { type: "connection"; state: ConnectionState }
   /** Events were missed. Without `session`: the stream reconnected, re-read whatever is on
-   *  screen. With it: only that conversation has a gap. */
-  | { type: "resync"; session?: string }
+   *  screen. With it: only that conversation has a gap. `gap`: what was missed is new messages
+   *  only (a step whose start was not seen); without it the history itself may have changed. */
+  | { type: "resync"; session?: string; gap?: true }
   /** A sent message moved through the queue. `id` is the id `prompt` returned. */
   | { type: "inbox"; session: string; id: string; status: InboxStatus }
   /** The agent started, or stopped for the given reason. `succeeded` means its queue ran dry. */
@@ -591,8 +592,10 @@ export type Backend = {
   running(directory: string): Promise<RunningCommand[]>
   /** Ends one of them. */
   kill(directory: string, id: string): Promise<void>
-  /** The whole conversation as it stands, including messages still waiting in the queue. */
-  transcript(session: string): Promise<Transcript>
+  /** The whole conversation as it stands, including messages still waiting in the queue. With
+   *  `gap`, only what came after the last messages read before may have changed (a gap in the
+   *  events, not an undo or a summary): a backend may then read only those. */
+  transcript(session: string, opts?: { gap?: boolean }): Promise<Transcript>
 
   replyPermission(session: string, id: string, decision: PermissionDecision): Promise<void>
   answerQuestion(session: string, id: string, answer: Answer): Promise<void>
