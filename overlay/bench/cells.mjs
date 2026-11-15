@@ -27,6 +27,12 @@ const click = async (page, sel) => {
   await page.mouse.click(...(await centre(page, sel)));
   await frames(page);
 };
+/** A click on an element's padding, near its top-left corner: the element itself, not a child. */
+const clickPad = async (page, sel) => {
+  const b = await page.locator(sel).first().boundingBox();
+  await page.mouse.click(b.x + 5, b.y + 5);
+  await frames(page);
+};
 /** Four strokes of 300 points, alt+drag. Each is drawn above the one before: the note card opens
  *  under everything drawn so far, and a press that lands on the card would not start a stroke.
  *  The press and the release are the mouse's. The moves between them are dispatched in the page:
@@ -84,8 +90,9 @@ const typing = ({ page }) => paced(45, WINDOW_MS, (i) => page.keyboard.press(i %
  *  and back, so every window starts from the same width. Each frame of it changes the preview. */
 async function resizeDrag({ page }) {
   const b = await page.locator("#c7").boundingBox();
-  const x = b.x + b.width + 1, y = b.y + b.height / 2;
+  const x = b.x + b.width, y = b.y + b.height / 2;
   await page.mouse.move(x, y);
+  await frames(page); // the handle under the pointer is the layer's, placed by a frame
   await page.mouse.down();
   await paced(170, WINDOW_MS - 150, (i) => page.mouse.move(x + 0.5 * (i < 85 ? i + 1 : 169 - i), y));
   await page.mouse.up();
@@ -101,9 +108,7 @@ async function motionSelected(t) {
   const { page } = t;
   await bob(t);
   await motionOn(page);
-  const b = await page.locator("#c7").boundingBox(); // on its padding: the card itself, not a child
-  await page.mouse.click(b.x + 5, b.y + 5);
-  await frames(page);
+  await clickPad(page, "#c7");
 }
 
 // ── cells ───────────────────────────────────────────────────────────────────────────────────────
@@ -147,7 +152,7 @@ export const CELLS = [
   { id: "hover", page: "heavy", enabled: true, run: sweep, base: "none-sweep", after: (r) => r.querySelectorAll(".box.hover").length === 1 },
   { id: "canvas-selected", page: "heavy", enabled: true, setup: async ({ page }) => (await canvasOn(page), await click(page, "#c7")), ready: inspecting },
   { id: "canvas-after-drag", page: "heavy", enabled: true, setup: canvasDrag, ready: inspecting },
-  { id: "canvas-drag", page: "heavy", enabled: true, setup: async ({ page }) => (await canvasOn(page), await click(page, "#c7")), ready: inspecting, run: resizeDrag },
+  { id: "canvas-drag", page: "heavy", enabled: true, setup: async ({ page }) => (await canvasOn(page), await clickPad(page, "#c7")), ready: inspecting, run: resizeDrag },
   { id: "motion-selected", page: "heavy", enabled: true, setup: motionSelected, base: "none+bob", ready: (r) => !r.querySelector(".m-hd").hidden },
   { id: "pins-scroll", page: "heavy", pins: PLACED, ready: (r) => r.querySelectorAll(".pin:not(.approx)").length === 20, run: wheel, base: "none-wheel", after: () => window.scrollY > 3000 },
   { id: "pins200-scroll", page: "heavy", pins: MANY, ready: (r) => r.querySelectorAll(".pin:not(.approx)").length > 5, run: wheel, base: "none-wheel", after: () => window.scrollY > 3000 },
