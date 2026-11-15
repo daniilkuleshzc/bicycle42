@@ -4,8 +4,26 @@
 .ink path { fill: none; stroke: #ef4444; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .ink rect { fill: color-mix(in srgb, var(--pa) 10%, transparent); stroke: var(--pa); stroke-width: 1.5; stroke-dasharray: 5 4; }
 .box { position: fixed; left: 0; top: 0; box-sizing: border-box; border-radius: 3px; pointer-events: none; }
-.box.hover { border: 1.5px dashed #3b82f6; background: rgba(59, 130, 246, 0.06); }
-.box.sel { border: 2px solid var(--pa); background: color-mix(in srgb, var(--pa) 10%, transparent); }
+/* An outline is not one bordered box but four strips, each with the border of its side, and a
+   fill. A box whose size changes is drawn again whole, at its old size and its new: over a large
+   element that is the whole window, on every move of the pointer (measured while hovering: 550 ms
+   of raster a second, and 7 as strips). A strip that moves or grows is drawn again only where
+   it was and is, a thin line, and its dashes are its own. The fill is a 100 px square scaled to
+   the outline's size on a layer of its own, so it is not drawn again either. The box holds them
+   and paints nothing itself (but motion's ring). Four strips cannot round a corner: the corners are square. */
+.box > i { position: absolute; display: none; border: 0 var(--bs, solid) var(--bc); }
+.box > .fill { left: 0; top: 0; width: 100px; height: 100px; transform-origin: 0 0; background: var(--bg); will-change: transform; }
+.box > .et { left: 0; right: 0; top: 0; border-top-width: var(--bw); }
+.box > .eb { left: 0; right: 0; bottom: 0; border-bottom-width: var(--bw); }
+/* The sides go between the top and the bottom, not over them, or a translucent line is darker at
+   its corners: by the width a border is drawn at, whole device pixels and at least one (--dp is
+   a device pixel, render.js sets it). */
+.box > .el, .box > .er { --in: max(var(--dp, 1px), round(down, var(--bw), var(--dp, 1px))); top: var(--in); bottom: var(--in); }
+.box > .el { left: 0; border-left-width: var(--bw); }
+.box > .er { right: 0; border-right-width: var(--bw); }
+.box:is(.hover, .sel, .csel, .mrow, .mcorn) > i:not(.fill), .box:is(.hover, .sel, .mrow) > .fill { display: block; }
+.box.hover { --bw: 1.5px; --bs: dashed; --bc: #3b82f6; --bg: rgba(59, 130, 246, 0.06); }
+.box.sel { --bw: 2px; --bc: var(--pa); --bg: color-mix(in srgb, var(--pa) 10%, transparent); }
 /* A selection's outline and the pins are compositor layers of their own: they keep their size
    and only move, with the scroll, so the page under them (which may be large) is not painted
    again. Not the hover outline: it changes size with every element, and a layer that is
@@ -109,7 +127,7 @@ textarea::placeholder { color: #9ca3af; }
 .ref:focus-visible { box-shadow: 0 0 0 2px #fffaa0; }
 /* canvas mode: on-page marks */
 [hidden] { display: none !important; }
-.box.csel { border: 1.5px solid var(--pa); }
+.box.csel { --bw: 1.5px; --bc: var(--pa); }
 .cv > * { position: fixed; left: 0; top: 0; box-sizing: border-box; pointer-events: none; }
 /* What the pointer grabs around the selection: the layer's own elements, so the cursor is theirs. */
 .hit > *, .gzs > * { position: absolute; left: 0; top: 0; box-sizing: border-box; pointer-events: auto; touch-action: none; }
@@ -273,11 +291,14 @@ textarea::placeholder { color: #9ca3af; }
 }
 /* motion mode: on the page, the open element (the accent), its corners while it plays, the
    elements of the list row under the pointer, a ring that goes out to find a small one */
-.box.mcorn { --c: var(--pa); background: linear-gradient(var(--c), var(--c)) 0 0 / 10px 1.5px no-repeat, linear-gradient(var(--c), var(--c)) 0 0 / 1.5px 10px no-repeat,
-  linear-gradient(var(--c), var(--c)) 100% 0 / 10px 1.5px no-repeat, linear-gradient(var(--c), var(--c)) 100% 0 / 1.5px 10px no-repeat,
-  linear-gradient(var(--c), var(--c)) 0 100% / 10px 1.5px no-repeat, linear-gradient(var(--c), var(--c)) 0 100% / 1.5px 10px no-repeat,
-  linear-gradient(var(--c), var(--c)) 100% 100% / 10px 1.5px no-repeat, linear-gradient(var(--c), var(--c)) 100% 100% / 1.5px 10px no-repeat; will-change: transform; }
-.box.mrow { border: 1.5px solid color-mix(in srgb, var(--pa) 55%, transparent); background: color-mix(in srgb, var(--pa) 8%, transparent); }
+/* (its corners are the outline's four strips, each a 10 px corner) */
+.box.mcorn { --bc: var(--pa); will-change: transform; }
+.box.mcorn > i:not(.fill) { box-sizing: border-box; width: 10px; height: 10px; }
+.box.mcorn > .et { right: auto; border-width: 1.5px 0 0 1.5px; }
+.box.mcorn > .er { top: 0; bottom: auto; border-width: 1.5px 1.5px 0 0; }
+.box.mcorn > .eb { left: auto; border-width: 0 1.5px 1.5px 0; }
+.box.mcorn > .el { top: auto; bottom: 0; border-width: 0 0 1.5px 1.5px; }
+.box.mrow { --bw: 1.5px; --bc: color-mix(in srgb, var(--pa) 55%, transparent); --bg: color-mix(in srgb, var(--pa) 8%, transparent); }
 .box.mfind { animation: mfind 700ms cubic-bezier(0.2, 0.8, 0.2, 1) 2; }
 @keyframes mfind { from { box-shadow: 0 0 0 0 color-mix(in srgb, var(--pa) 55%, transparent); } to { box-shadow: 0 0 0 22px transparent; } }
 @media (prefers-reduced-motion: reduce) { .box.mfind { animation: none; } }

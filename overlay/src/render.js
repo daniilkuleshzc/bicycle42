@@ -15,15 +15,28 @@ export function pool(container, n, make) {
   return [...container.children];
 }
 
-function placeBox(div, r, cls) {
+/** An outline: a fill and four edge strips in a box that paints nothing (styles.css says why). */
+function makeBox() {
+  const div = document.createElement("div");
+  div.innerHTML = `<i class="fill"></i><i class="et"></i><i class="er"></i><i class="eb"></i><i class="el"></i>`;
+  return div;
+}
+
+function placeBox(div, r, cls, dpr) {
   // Most frames an outline has not moved: nothing is written then (no restyle for an idle selection).
-  const k = `${cls}|${r.x}|${r.y}|${r.w}|${r.h}`;
+  const k = `${cls}|${r.x}|${r.y}|${r.w}|${r.h}|${dpr}`;
   if (div._k === k) return;
   div._k = k;
-  div.className = `box ${cls}`;
-  div.style.transform = `translate(${r.x}px, ${r.y}px)`;
-  div.style.width = `${r.w}px`;
-  div.style.height = `${r.h}px`;
+  if (div._cls !== cls) div.className = `box ${(div._cls = cls)}`;
+  // Its edges on whole device pixels: a strip that starts part of a pixel in is drawn blurred
+  // over two (one bordered box was snapped as a whole).
+  const x = Math.round(r.x * dpr) / dpr, y = Math.round(r.y * dpr) / dpr;
+  const w = Math.round((r.x + r.w) * dpr) / dpr - x, h = Math.round((r.y + r.h) * dpr) / dpr - y;
+  div.style.transform = `translate(${x}px, ${y}px)`;
+  div.style.width = `${w}px`;
+  div.style.height = `${h}px`;
+  // The fill is a 100 px square: scaled, never resized.
+  /** @type {HTMLElement} */ (div.firstChild).style.transform = `scale(${w / 100}, ${h / 100})`;
 }
 
 /** Where a pin sits: the top-left of the element, or of its text when it holds only text
@@ -46,6 +59,48 @@ function pinPoint(el) {
   return [r.left - 8, r.top - 8];
 }
 
+// A pin keeps its place on the page, not in the window: while the document scrolls it is moved
+// by the scroll and not measured (each measure is a rect or two and a Range's). It is measured
+// again after a DOM change, a resize, a scroll of something inside the page (that moves what is
+// in it, and not the document), and at least every PIN_MEASURE_MS for what none of those report
+// (a style or a class changed, a CSS animation, an image that loaded). A pin in a fixed or sticky
+// box moves on the page as the document scrolls: it is measured every frame.
+const PIN_MEASURE_MS = 250;
+const FIXED_CHECK_MS = 1000;
+let innerScrolls = 0;
+let watchingScrolls = false;
+const onScroll = (/** @type {Event} */ e) => {
+  if (e.target !== document) innerScrolls++;
+};
+
+/** Whether el, or a box it is in, is fixed or sticky: then where it is on the page is not where it
+ *  stays. Only el and its offset parents are looked at: a fixed or sticky box is positioned, so
+ *  any that el is in is one of them (the style of every ancestor of 200 pins is too much to read
+ *  four times a second). */
+function inFixed(el) {
+  for (let n = el; n; n = "offsetParent" in n ? n.offsetParent : n.parentElement) { // (an svg element has none)
+    const pos = getComputedStyle(n).position;
+    if (pos === "fixed" || pos === "sticky") return true;
+  }
+  return false;
+}
+
+/** Where a found pin is in the window this frame: measured, or moved by the scroll since it was. */
+function pinAt(p, now) {
+  let m = p.measured;
+  const changed = !m || m.el !== p.el || m.dom !== domVersion || m.w !== VP.w || m.h !== VP.h;
+  if (changed || m.fixed || m.scrolls !== innerScrolls || now - m.t >= PIN_MEASURE_MS) {
+    const at = pinPoint(p.el);
+    // Whether it is fixed is looked at again after a change to the page, or once a second (a
+    // class that makes a box sticky is not a DOM change); not with every measure.
+    const check = changed || !m.at || now - m.ft >= FIXED_CHECK_MS;
+    const fixed = !!at && (check ? inFixed(p.el) : m.fixed);
+    m = p.measured = { el: p.el, at: at && !fixed ? [at[0] + VP.sx, at[1] + VP.sy] : at, fixed, ft: check ? now : m.ft,
+      dom: domVersion, scrolls: innerScrolls, w: VP.w, h: VP.h, t: now };
+  }
+  return m.at && (m.fixed ? m.at : [m.at[0] - VP.sx, m.at[1] - VP.sy]);
+}
+
 export function render() {
   if (!root) return;
   readView();
@@ -60,8 +115,10 @@ export function render() {
   if (S.enabled || capturing) for (const el of S.sel) if (el.isConnected) items.push([rectOf(el), "sel"]);
   if (canvasBoxes) items.push(...canvasBoxes);
   if (motionBoxes) items.push(...motionBoxes);
-  const divs = pool(boxes, items.length, () => document.createElement("div"));
-  items.forEach(([r, cls], i) => placeBox(divs[i], r, cls));
+  const dpr = window.devicePixelRatio || 1;
+  if (boxes._dpr !== dpr) boxes.style.setProperty("--dp", `${1 / (boxes._dpr = dpr)}px`);
+  const divs = pool(boxes, items.length, makeBox);
+  items.forEach(([r, cls], i) => placeBox(divs[i], r, cls, dpr));
 
   // notes mode's ink and card: after the boxes are written (notes/frame.js says why)
   Notes.frame(capturing);
@@ -71,6 +128,10 @@ export function render() {
   const unplaced = [];
   const now = performance.now();
   Canvas.readPathsIfDue(now);
+  if (S.pins.length && !watchingScrolls) {
+    watchingScrolls = true;
+    window.addEventListener("scroll", onScroll, { capture: true, passive: true });
+  }
   for (const p of S.pins) {
     let at = null;
     let approx = false;
@@ -85,7 +146,7 @@ export function render() {
         p.misses = p.el ? 0 : (p.misses || 0) + 1;
         p.retryAt = p.misses > 1 ? now + Math.min(1000, 16 * 2 ** (p.misses - 1)) : 0;
       }
-      if (p.el && p.el.isConnected) at = pinPoint(p.el);
+      if (p.el && p.el.isConnected) at = pinAt(p, now);
     }
     if (!at && p.at) {
       at = toView(p.at);
@@ -95,7 +156,6 @@ export function render() {
     if (at && !capturing) visible.push([p, at, approx]);
   }
   const pinEls = pool(pinsEl, visible.length, makePin);
-  const dpr = window.devicePixelRatio || 1;
   if (!visible.length) hideTip();
   visible.forEach(([p, [x, y], approx], i) => {
     const el = pinEls[i];
