@@ -125,15 +125,21 @@ export function render() {
 // Draw every frame only while a note is being made or the reviewer is doing something (outlines
 // must follow the layout as it moves). Otherwise the layer redraws when something says it may
 // have moved: DOM changes, scroll, resize. A slow tick covers what none of those report (CSS
-// animations, late-loading images), so idle pins cost a few redraws a second, not sixty.
+// animations, late-loading images), so idle pins cost a few redraws a second, not sixty. With
+// review off and no pins nothing is drawn at all: input, scroll and DOM changes ask for nothing.
 const IDLE_TICK_MS = 250;
 const ACTIVE_MS = 500;
 let idleTimer = 0;
 let lastInput = 0;
 let raf = 0; // the frame asked for, 0 when none is
 export function active() {
+  if (!(S.enabled || S.pins.length)) return;
   lastInput = performance.now();
   kick();
+}
+/** The page changed or scrolled under the layer. */
+export function moved() {
+  if (S.enabled || S.pins.length) kick();
 }
 function frame() {
   raf = 0;

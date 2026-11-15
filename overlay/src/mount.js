@@ -7,7 +7,7 @@ import * as Canvas from "./canvas/api.js";
 import * as Motion from "./motion/api.js";
 import { hostMode, retellMode } from "./mode.js";
 import { blockIfActive, isOurs, LEFT_FOR_US, leftForUs, onKeyDown, onPointerDown, onPointerMove, onPointerUp, OURS_ONLY, oursOnly, setEnabled, setPins } from "./input.js";
-import { active, kick } from "./render.js";
+import { active, kick, moved } from "./render.js";
 import STYLES from "./styles.css"; // its text: the build loads a stylesheet as a string
 
 // ── mount ───────────────────────────────────────────────────────────────────────────────────
@@ -87,8 +87,12 @@ function mount() {
     // (Before any batch is applied again: this observer was made first, so it is told first.)
     Canvas.treeChanged(records);
     domVersion++;
-    if (records.some(addsOrRemoves)) treeVersion++;
-    kick();
+    const tree = records.some(addsOrRemoves);
+    if (tree) treeVersion++;
+    // With review off and no pins there is nothing to follow; a variant group that came or went
+    // still needs its one frame, which hides all but the chosen option, review on or off.
+    if (S.enabled || S.pins.length) moved();
+    else if (tree) kick();
   }).observe(document.documentElement, { childList: true, subtree: true, characterData: true, attributeFilter: ["open"] });
   // Something of the page's entered the top layer after us: go back on top of it.
   window.addEventListener(
@@ -114,8 +118,8 @@ function mount() {
   for (const t of ["mousedown", "mouseup", "click", "dblclick", "auxclick", "dragstart", "selectstart", "touchstart"])
     window.addEventListener(t, blockIfActive, opts);
   window.addEventListener("keydown", onKeyDown, opts);
-  window.addEventListener("scroll", kick, { capture: true, passive: true });
-  window.addEventListener("resize", kick, { passive: true });
+  window.addEventListener("scroll", moved, { capture: true, passive: true });
+  window.addEventListener("resize", moved, { passive: true });
   for (const type of ["pointerdown", "pointermove", "pointerup", "keydown", "keyup", "wheel"])
     window.addEventListener(type, active, { capture: true, passive: true });
 
