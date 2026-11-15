@@ -15,15 +15,28 @@ export function pool(container, n, make) {
   return [...container.children];
 }
 
-function placeBox(div, r, cls) {
+/** An outline: a fill and four edge strips in a box that paints nothing (styles.css says why). */
+function makeBox() {
+  const div = document.createElement("div");
+  div.innerHTML = `<i class="fill"></i><i class="et"></i><i class="er"></i><i class="eb"></i><i class="el"></i>`;
+  return div;
+}
+
+function placeBox(div, r, cls, dpr) {
   // Most frames an outline has not moved: nothing is written then (no restyle for an idle selection).
-  const k = `${cls}|${r.x}|${r.y}|${r.w}|${r.h}`;
+  const k = `${cls}|${r.x}|${r.y}|${r.w}|${r.h}|${dpr}`;
   if (div._k === k) return;
   div._k = k;
-  div.className = `box ${cls}`;
-  div.style.transform = `translate(${r.x}px, ${r.y}px)`;
-  div.style.width = `${r.w}px`;
-  div.style.height = `${r.h}px`;
+  if (div._cls !== cls) div.className = `box ${(div._cls = cls)}`;
+  // Its edges on whole device pixels: a strip that starts part of a pixel in is drawn blurred
+  // over two (one bordered box was snapped as a whole).
+  const x = Math.round(r.x * dpr) / dpr, y = Math.round(r.y * dpr) / dpr;
+  const w = Math.round((r.x + r.w) * dpr) / dpr - x, h = Math.round((r.y + r.h) * dpr) / dpr - y;
+  div.style.transform = `translate(${x}px, ${y}px)`;
+  div.style.width = `${w}px`;
+  div.style.height = `${h}px`;
+  // The fill is a 100 px square: scaled, never resized.
+  /** @type {HTMLElement} */ (div.firstChild).style.transform = `scale(${w / 100}, ${h / 100})`;
 }
 
 /** Where a pin sits: the top-left of the element, or of its text when it holds only text
@@ -60,8 +73,10 @@ export function render() {
   if (S.enabled || capturing) for (const el of S.sel) if (el.isConnected) items.push([rectOf(el), "sel"]);
   if (canvasBoxes) items.push(...canvasBoxes);
   if (motionBoxes) items.push(...motionBoxes);
-  const divs = pool(boxes, items.length, () => document.createElement("div"));
-  items.forEach(([r, cls], i) => placeBox(divs[i], r, cls));
+  const dpr = window.devicePixelRatio || 1;
+  if (boxes._dpr !== dpr) boxes.style.setProperty("--dp", `${1 / (boxes._dpr = dpr)}px`);
+  const divs = pool(boxes, items.length, makeBox);
+  items.forEach(([r, cls], i) => placeBox(divs[i], r, cls, dpr));
 
   // notes mode's ink and card: after the boxes are written (notes/frame.js says why)
   Notes.frame(capturing);
@@ -95,7 +110,6 @@ export function render() {
     if (at && !capturing) visible.push([p, at, approx]);
   }
   const pinEls = pool(pinsEl, visible.length, makePin);
-  const dpr = window.devicePixelRatio || 1;
   if (!visible.length) hideTip();
   visible.forEach(([p, [x, y], approx], i) => {
     const el = pinEls[i];

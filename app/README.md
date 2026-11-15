@@ -236,10 +236,9 @@ on its pin and in the chat. A note may be new CSS rules and nothing else.
   adding new elements and editing HTML.
 - Canvas mode: the edited area's crop is cut where the elements are after the edits and before
   them, but a note of new CSS rules alone is cut around at most 20 of the elements they match.
-- The overlay on a heavy page: a hover outline that changes size repaints what is under it
-  (a layer of its own did not help: it is drawn anew at every size), and the note card is
-  painted again as it follows the scroll. Outlines of a fixed look, moved and scaled by
-  transform only, would need square corners and a solid line.
+- The overlay's outlines have square corners: each is four edge strips and a scaled fill, so
+  an outline that changes size repaints only thin lines, not what is under it (a rounded box
+  repainted its whole old and new size, which over a large element is the whole window).
 - Session rotation every N notes.
 - A failed note can be retried until the app restarts; after that its screenshot is gone.
 - Pending permission requests of the background conversation are only seen live, not after a reconnect.
