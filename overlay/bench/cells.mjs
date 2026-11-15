@@ -203,6 +203,6 @@ export const invariants = (fps) => [
   ["typing", "layouts", 16],
   // Missing pins on a page that changes: what looking for them adds, at most.
   ["pins-missing", "searches", 10, "off+churn"],
-  // (hover has none: it is judged by its raster ms. Its counts are what one outline that follows
-  // the pointer costs however it is drawn: a frame, a layout and a paint per move.)
+  // (hover has none: it is judged by its raster ms. Its counts, a frame a move and the layouts
+  // and paints of an outline that moves, stay the same however the outline is drawn.)
 ];
