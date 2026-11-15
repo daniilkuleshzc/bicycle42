@@ -166,7 +166,7 @@ export type Pin = {
 /** A note template, offered after "/" in the note card. */
 export type Template = { name: string; hint: string }
 
-/** page → host: window.__review(JSON.stringify(msg)), a CDP binding or a shim. */
+/** page → host: window.__review(JSON.stringify(msg)): the app's preload sends it over IPC, the harness has a shim. */
 export type PageMessage =
   /** The overlay is mounted; the host replies with "state". */
   | { type: "ready"; url: string; viewport: Viewport }

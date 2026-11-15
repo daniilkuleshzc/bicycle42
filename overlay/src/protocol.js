@@ -7,7 +7,7 @@
  * reload of the page loses nothing (the host sends them back on "ready").
  *
  * ── Protocol ────────────────────────────────────────────────────────────────────────────────────
- * page → host   window.__review(JSON.stringify(msg))      (a CDP Runtime.addBinding, or a shim)
+ * page → host   window.__review(JSON.stringify(msg))      (the app's preload, over IPC; the harness's shim)
  * host → page   window.__b42.receive(msg)
  * host → page, sync  window.__b42.busy()                true while the reviewer is mid-note
  * Every message of both directions, and what a note, a draft and a pin carry, are types in
