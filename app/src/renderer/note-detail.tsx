@@ -3,7 +3,7 @@
 // and what the reviewer does about a result that is not right (say more about it, take it back);
 // one that is right needs nothing done. The
 // requests and the message box stay under it.
-import { For, Show, createEffect, createResource, createSignal, on, onCleanup, onMount } from "solid-js"
+import { For, Show, createEffect, createMemo, createResource, createSignal, on, onCleanup, onMount } from "solid-js"
 import type { FileChange, NoteRow } from "../shared/types"
 import { Changes, Counts } from "./chat"
 import { Icon } from "./icons"
@@ -89,13 +89,15 @@ function NoteDetail(props: { note: NoteRow }) {
   const [sure, setSure] = createSignal<"undone" | "asked" | false>(false)
   const [busy, setBusy] = createSignal(false)
 
-  const pictures = () => {
+  // One array for as long as the pictures are the same: <For> keeps each <img> (and the picture
+  // it has decoded) instead of making both anew whenever the list is read.
+  const pictures = createMemo(() => {
     const s = shots()
     return [
       ...(s?.before ? [{ name: `Note ${n().n}: before`, src: s.before }] : []),
       ...(s?.after ? [{ name: `Note ${n().n}: after`, src: s.after }] : []),
     ]
-  }
+  })
   const loadDiff = () => {
     setLoading(true)
     setError("")
@@ -201,7 +203,7 @@ function NoteDetail(props: { note: NoteRow }) {
             <For each={pictures()}>
               {(picture, i) => (
                 <button class="note-shot" title={`${picture.name}. Click to enlarge; the arrow keys go between the two.`} onClick={() => openLightbox(pictures(), i())}>
-                  <img src={picture.src} alt={picture.name} />
+                  <img src={picture.src} alt={picture.name} loading="lazy" decoding="async" />
                   <span>{i() === 0 ? "Before" : "After"}</span>
                 </button>
               )}
