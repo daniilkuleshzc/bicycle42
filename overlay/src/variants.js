@@ -3,7 +3,7 @@ import { icon, ICONS } from "./ui.js";
 import { rectOf } from "./page.js";
 import * as Notes from "./notes/api.js";
 import { active, pool } from "./render.js";
-import { domVersion, hostEl, variantsEl, variantStyle } from "./mount.js";
+import { hostEl, treeVersion, variantsEl, variantStyle } from "./mount.js";
 
 // ── variants ────────────────────────────────────────────────────────────────────────────────
 // The /variants template asks the agent to render every option as siblings in one wrapper:
@@ -30,8 +30,8 @@ function pageAccent() {
 }
 
 function scanVariants() {
-  if (V.version === domVersion) return;
-  V.version = domVersion;
+  if (V.version === treeVersion) return; // only when elements came or went: a text that changes is no new group
+  V.version = treeVersion;
   const accent = pageAccent();
   if (accent !== V.accent) {
     hostEl.style.setProperty("--pa", (V.accent = accent));

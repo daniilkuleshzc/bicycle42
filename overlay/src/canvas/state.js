@@ -8,7 +8,9 @@ import { hostEl } from "../mount.js";
 //    constructed stylesheets (adopted by the document, so they leave no node behind and survive
 //    a framework re-render); class and text edits have to write the DOM, so they are recorded
 //    with their original value, re-applied when the page re-renders, and put back exactly;
-//    the one other write is the stamp that says which element an edit is on (see stamp());
+//    the one other write is the stamp that says which element an edit is on (see stamp()), and
+//    during a drag one custom property in the dragged element's style, which its rule reads
+//    (cursor.js says why; the attribute is put back as it was when the drag ends);
 //  - the batch is plain data ({ els, sheet, ops }), so undo is a stack of snapshots, the draft is
 //    the batch itself, and a sent batch is the same object with a note id.
 export const MAX_EDITS = 40;

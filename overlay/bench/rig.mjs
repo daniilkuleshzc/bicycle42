@@ -107,16 +107,17 @@ export async function displayRate(rig) {
   return rate;
 }
 
-/** A fresh page with the counters, the host and the overlay file under test; review on or off. */
+/** A fresh page with the counters, the host and the overlay file under test; review on or off.
+ *  With no overlay (null), the page alone: what the page costs by itself. */
 export async function open(rig, overlay, { page: name, enabled = false, pins = [] }) {
   const page = await rig.browser.newPage({ viewport: { width: 1400, height: 900 } });
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
   await page.addInitScript(PROBE);
   await page.addInitScript(SHIM, { enabled, pins });
-  await page.addInitScript({ path: overlay });
+  if (overlay) await page.addInitScript({ path: overlay });
   await page.goto(`${rig.base}/${name}`);
-  await page.waitForFunction((on) => document.querySelector("b42-review") && document.documentElement.hasAttribute("data-b42-review") === on, enabled);
+  if (overlay) await page.waitForFunction((on) => document.querySelector("b42-review") && document.documentElement.hasAttribute("data-b42-review") === on, enabled);
   const cdp = await page.context().newCDPSession(page);
   // timeTicks: the clock trace events use, so Paint events can be cut to the measured window.
   await cdp.send("Performance.enable", { timeDomain: "timeTicks" });

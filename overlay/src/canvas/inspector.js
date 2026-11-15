@@ -137,7 +137,10 @@ export function drawComputed() {
   // set by its script (the agent's edit, hot-reloaded, is often just that). domVersion does not
   // count those, so the selection's own two attributes are part of the key; and once a second
   // the values are read again whatever happened (a stylesheet swapped, a class on a parent).
-  const attrs = el && el.isConnected ? `${el.getAttribute("class")}|${el.getAttribute("style")}` : "";
+  // (A drag's own property in the style attribute is not the page's change: the attribute as it
+  // was before the drag counts, so the values are not read again on every frame of the drag.)
+  const inline = C.liveEl && C.liveEl.el === el ? C.liveEl.was : el && el.getAttribute("style");
+  const attrs = el && el.isConnected ? `${el.getAttribute("class")}|${inline}` : "";
   const key = `${C.selRs}|${C.rev}|${domVersion}|${C.collapsed}|${attrs}`;
   if ((key === C.compKey && now - C.compAt < 1000) || now - C.compAt < 150) return;
   C.compKey = key;

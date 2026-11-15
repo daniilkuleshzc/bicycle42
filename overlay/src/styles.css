@@ -96,7 +96,9 @@
 .kg { flex: none; display: inline-block; vertical-align: -1px; }
 /* The note and, in its corner, the ↵ that sends it: lit once there is something to send. */
 .cbody { display: flex; align-items: flex-end; gap: 6px; }
-.cbody textarea { flex: 1; min-width: 0; }
+/* It grows with its text by itself, from two lines (its rows="2") to 240px: no script resizes it
+   on each key, which was a layout per key. */
+.cbody textarea { flex: 1; min-width: 0; field-sizing: content; min-height: calc(2lh + 8px); }
 textarea { all: unset; display: block; width: 100%; box-sizing: border-box; min-height: 44px; max-height: 240px;
   overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 4px 2px; color: #ededed; font: inherit;
   cursor: text; }

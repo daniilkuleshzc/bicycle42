@@ -74,7 +74,7 @@ node scripts/screenshot.mjs        # regenerates docs/harness.png
 ## Benchmark
 
 ```bash
-bun run bench                                  # the overlay as src/ has it, two to three minutes
+bun run bench                                  # the overlay as src/ has it, about six minutes
 bun run bench -- path/to/overlay.js            # a built copy
 bun run bench -- --json out.json               # also writes every window's numbers
 bun run bench -- --cells strokes,selected      # only some states
@@ -82,20 +82,33 @@ BENCH_GPU=1 bun run bench                      # drawn by the graphics card, as 
 git stash && bun run build -- /tmp/old.js && git stash pop && bun run bench -- --compare /tmp/old.js
 ```
 
-What the overlay costs the page under review, in twelve states (`bench/cells.mjs`): review off,
-on and idle, an element selected, four strokes drawn, strokes while scrolling, the pointer
-moving, canvas mode, pins that are missing, scrolled past or working. The pages are made in
-memory: `heavy` (5,000 elements) and `churn` (2,000, one text changing every frame). Each state
-settles, then is measured over three windows of 3 s; the table shows the median, per second:
-main-thread, script, layout, style-recalc, paint, raster and GPU milliseconds and counts from
-Chromium, and four counts of the overlay's own: frames, timers fired, stroke path writes and
-document searches.
+What the overlay costs the page under review, state by state (`bench/cells.mjs`): review off
+(still, with the pointer moving, the wheel, the page scrolling itself, the page changing), on
+and idle, an element selected (on a still page and on one that changes), four strokes drawn,
+strokes while scrolling, a stroke being drawn, typing in the note card, the pointer moving,
+canvas mode (a selection, after a drag, during a resize drag), motion mode with an animation
+open, pins that are missing, scrolled past (twenty, then two hundred) or working. The pages are
+made in memory: `heavy` (5,000 elements) and `churn` (2,000, one text changing every frame).
+Each state settles, then is measured over three windows of 3 s; the table shows the median, per
+second: main-thread, script, layout, style-recalc, paint, raster and GPU milliseconds and counts
+from Chromium, and four counts of the overlay's own: frames, timers fired, stroke path writes
+and document searches.
+
+The `none` states are the pages with no overlay at all (still, changing, under the pointer, the
+wheel, with an animation): the page's own cost. Each other state's `own ms` is its busy ms less
+that of the `none` state with the same page and gesture, so it is the overlay's own
+milliseconds. `--cells` measures a state's baseline with it.
 
 Below the table are the invariants, checked from counts only (milliseconds depend on the
-machine): off costs no frames and no timers; idle is the 250 ms tick; a selection or drawn
-strokes cause no layout, no style recalc and no path writes while nothing moves; strokes cause
-no layout and no path writes while the page scrolls; there is one chain of frames, not two;
-missing pins add at most 10 searches a second. One that fails exits with code 1. With
+machine): with review off and no pins there are no frames, no timers and no searches, whatever
+the pointer, the wheel or the page does; idle is the 250 ms tick, with an element selected,
+strokes drawn or a canvas selection too; a selection or drawn strokes cause no layout, no style
+recalc and no path writes while nothing moves; strokes cause no layout and no path writes while
+the page scrolls, and strokes and pins (20 or 200) are painted at most 5 times a second then; on
+a page that changes there is one chain of frames, not two, and a changed text is no reason to
+search the document; typing lays out once a key; missing pins add at most 10 searches a second.
+`hover` has none: what one outline that follows the pointer costs is in its raster ms. One that
+fails exits with code 1. With
 `--compare` each state has two rows (a: the first file, b: the other) and both lists of
 invariants; only the first file decides the exit code. To judge a change, compare the counts
 first, then the milliseconds of rows a and b (they are taken minutes apart at most, on the same

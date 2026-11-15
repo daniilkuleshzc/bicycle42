@@ -1,7 +1,7 @@
 import { S } from "../state.js";
 import { keyNodes } from "../ui.js";
 import { draftChanged } from "../draft.js";
-import { autosize, CARD_KEYS, drawCardSend, setHint } from "./card.js";
+import { CARD_KEYS, drawCardSend, setHint } from "./card.js";
 import { setTemplate, updateMenu } from "./templates.js";
 import { onPaste } from "./pictures.js";
 import { submit } from "./submit.js";
@@ -58,7 +58,6 @@ export function mount() {
     setHint("");
     drawCardSend();
     updateMenu();
-    autosize();
     draftChanged();
   });
 }
