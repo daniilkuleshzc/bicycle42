@@ -15,6 +15,7 @@ import STYLES from "./styles.css"; // its text: the build loads a stylesheet as 
 // are here and not with the rest of the state; every other file reads them.
 export let hostEl, root, boxes, pinsEl, cursorStyle, tip, variantsEl, variantStyle;
 export let domVersion = 0; // bumped on every DOM mutation; pins re-search only when it changes
+export let treeVersion = 0; // bumped when elements are added or removed (not for a text): variant groups are looked for again
 
 // The layer has to be the topmost thing on the page and has to take typing, whatever the page
 // shows. Two browser rules decide where it sits:
@@ -44,6 +45,9 @@ function raise() {
   } catch {}
   if (typing) Notes.textarea.focus({ preventScroll: true });
 }
+
+/** A mutation record that adds or removes an element (a text node coming or going is a text). */
+const addsOrRemoves = (r) => r.type === "childList" && [...r.addedNodes, ...r.removedNodes].some((n) => n.nodeType === 1);
 
 function mount() {
   if (hostEl && hostEl.isConnected) return;
@@ -83,6 +87,7 @@ function mount() {
     // (Before any batch is applied again: this observer was made first, so it is told first.)
     Canvas.treeChanged(records);
     domVersion++;
+    if (records.some(addsOrRemoves)) treeVersion++;
     kick();
   }).observe(document.documentElement, { childList: true, subtree: true, characterData: true, attributeFilter: ["open"] });
   // Something of the page's entered the top layer after us: go back on top of it.
