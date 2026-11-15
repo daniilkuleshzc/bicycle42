@@ -317,12 +317,15 @@ test("resize: an edge drag writes width into element styles, snapped to 4px; mod
   await clickAt(page, f, SECOND, 100, 80);
   const b = await box(f, SECOND);
   const label = { text: "" };
+  const inline = () => f.evaluate((s) => document.querySelector(s).getAttribute("style"), SECOND);
+  const before = await inline();
   await drag(page, f, b.x + b.width, b.y + 30, b.x + b.width + 57, b.y + 30, {
     hold: async () => (label.text = await ui(f, (r) => r.querySelector(".lab.live").textContent)),
   });
   assert.equal(label.text, "width 200 → 256", "the live label follows the drag");
   assert.equal(await field(f, "css").inputValue(), "width: 256px;");
   assert.equal((await box(f, SECOND)).width, 256);
+  assert.equal(await inline(), before, "the drag's preview leaves the element's own style attribute as it was");
   // without snapping, and replacing the declaration in place
   await page.keyboard.down(MOD);
   await drag(page, f, b.x + 256, b.y + 30, b.x + 256 + 13, b.y + 30);
@@ -663,6 +666,7 @@ test("Esc cancels a drag; nothing is ever sent without Enter", async () => {
   await frames(f);
   assert.equal((await box(f, SECOND)).width, 200);
   assert.equal(await field(f, "css").inputValue(), "");
+  assert.equal(await f.evaluate((s) => document.querySelector(s).getAttribute("style"), SECOND), null, "no style attribute is left behind");
   // every other way of making edits, and the bar's buttons: no note
   await drag(page, f, b.x + b.width, b.y + 30, b.x + b.width + 40, b.y + 30);
   await f.locator("b42-review .undo").click();
